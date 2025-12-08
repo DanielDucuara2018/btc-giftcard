@@ -1,0 +1,81 @@
+networks:
+  gift_card_bridge:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 169.254.12.0/24
+
+services:
+  # app:
+  #   build:
+  #     context: ./
+  #     dockerfile: ./Dockerfile
+  #     target: dev
+  #   networks:
+  #     gift_card_bridge:
+  #       ipv4_address: 169.254.12.2
+  #       aliases:
+  #         - "gift-card-backend.app"
+  #   ports:
+  #     - 3203:3203
+  #   volumes:
+  #     # Only mount source code for development (not dependencies)
+  #     - ./gift_card_backend:/app/gift_card_backend
+  #     - ./alembic:/app/alembic
+  #     - ./config.ini:/app/config.ini
+  #     - /app/gift_card_backend.egg-info/
+  #   env_file:
+  #     - .env
+  #   environment:
+  #     # Prevent Python from writing .pyc files and buffer output
+  #     - PYTHONDONTWRITEBYTECODE=1
+  #     - PYTHONUNBUFFERED=1
+  #   depends_on:
+  #     postgres:
+  #       condition: service_healthy
+  #     redis:
+  #       condition: service_healthy
+
+  # postgres:
+  #   image: postgres:17.1-alpine
+  #   networks:
+  #     gift_card_bridge:
+  #       ipv4_address: 169.254.12.3
+  #       aliases:
+  #         - "gift-card-backend.db"
+  #   ports:
+  #     - 5432:5432
+  #   environment:
+  #     POSTGRES_PASSWORD: postgres
+  #   volumes:
+  #     - postgres_data:/var/lib/postgresql/data
+  #     - ./pgsql/init.d:/docker-entrypoint-initdb.d
+  #   healthcheck:
+  #     test: ["CMD", "pg_isready", "-U", "postgres"]
+  #     interval: 5s
+  #     timeout: 3s
+  #     retries: 3
+  #     start_period: 10s
+
+  redis:
+    image: redis:7-alpine
+    networks:
+      gift_card_bridge:
+        ipv4_address: 169.254.12.4
+        aliases:
+          - "gift-card-backend.cache"
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes --save 60 1000
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
+volumes:
+  redis_data:
+  # postgres_data:
