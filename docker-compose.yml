@@ -36,26 +36,26 @@ services:
   #     redis:
   #       condition: service_healthy
 
-  # postgres:
-  #   image: postgres:17.1-alpine
-  #   networks:
-  #     gift_card_bridge:
-  #       ipv4_address: 169.254.12.3
-  #       aliases:
-  #         - "gift-card-backend.db"
-  #   ports:
-  #     - 5432:5432
-  #   environment:
-  #     POSTGRES_PASSWORD: postgres
-  #   volumes:
-  #     - postgres_data:/var/lib/postgresql/data
-  #     - ./pgsql/init.d:/docker-entrypoint-initdb.d
-  #   healthcheck:
-  #     test: ["CMD", "pg_isready", "-U", "postgres"]
-  #     interval: 5s
-  #     timeout: 3s
-  #     retries: 3
-  #     start_period: 10s
+  postgres:
+    image: postgres:17.1-alpine
+    networks:
+      gift_card_bridge:
+        ipv4_address: 169.254.12.3
+        aliases:
+          - "gift-card-backend.db"
+    ports:
+      - 5432:5432
+    environment:
+      POSTGRES_PASSWORD: postgres
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./pgsql/init.d:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
 
   redis:
     image: redis:7-alpine
@@ -78,4 +78,4 @@ services:
 
 volumes:
   redis_data:
-  # postgres_data:
+  postgres_data:

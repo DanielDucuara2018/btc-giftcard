@@ -3,11 +3,13 @@ package cache
 import (
 	"btc-giftcard/pkg/logger"
 	"context"
+	"time"
+
 	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
-	"time"
 )
 
+// Config holds Redis connection configuration parameters
 type Config struct {
 	Host     string
 	Port     string
@@ -15,8 +17,11 @@ type Config struct {
 	DB       int
 }
 
+// Client is the global Redis client instance used by the cache package
 var Client *redis.Client
 
+// Init initializes the Redis client with the provided configuration
+// It tests the connection with a Ping command and sets the global Client variable
 func Init(cfg Config) error {
 	// redis options
 	opts := redis.Options{
@@ -40,6 +45,8 @@ func Init(cfg Config) error {
 	return nil
 }
 
+// Get retrieves the value of a key from Redis
+// Returns empty string if key doesn't exist (redis.Nil is not treated as error)
 func Get(ctx context.Context, key string) (string, error) {
 	val, err := Client.Get(ctx, key).Result()
 	if err == redis.Nil { // Key does not exist
@@ -51,6 +58,8 @@ func Get(ctx context.Context, key string) (string, error) {
 	return val, nil
 }
 
+// Set stores a key-value pair in Redis with the specified expiration time
+// Use 0 for expiration to set a key without expiration
 func Set(ctx context.Context, key string, value interface{}, expiration time.Duration) error {
 	err := Client.Set(ctx, key, value, expiration).Err()
 	if err != nil {
@@ -60,6 +69,8 @@ func Set(ctx context.Context, key string, value interface{}, expiration time.Dur
 	return nil
 }
 
+// Delete removes one or more keys from Redis
+// Returns the number of keys that were deleted
 func Delete(ctx context.Context, keys ...string) (int64, error) {
 	res, err := Client.Del(ctx, keys...).Result()
 	if err != nil {
@@ -69,6 +80,8 @@ func Delete(ctx context.Context, keys ...string) (int64, error) {
 	return res, nil
 }
 
+// Exists checks if a key exists in Redis
+// Returns true if the key exists, false otherwise
 func Exists(ctx context.Context, key string) (bool, error) {
 	res, err := Client.Exists(ctx, key).Result()
 	if err != nil {
@@ -78,8 +91,10 @@ func Exists(ctx context.Context, key string) (bool, error) {
 	return res > 0, nil
 }
 
+// SetNX sets a key-value pair only if the key does not exist (SET if Not eXists)
+// Returns true if the key was set, false if key already exists
+// Useful for distributed locking and preventing race conditions
 func SetNX(ctx context.Context, key string, value interface{}, expiration time.Duration) (bool, error) {
-	// Set if Not eXists - returns true if set, false if key exists (prevents race conditions)
 	set, err := Client.SetNX(ctx, key, value, expiration).Result()
 	if err != nil {
 		logger.Error("Failed to set NX key in Redis", zap.String("key", key), zap.Error(err))
@@ -88,6 +103,9 @@ func SetNX(ctx context.Context, key string, value interface{}, expiration time.D
 	return set, nil
 }
 
+// Incr increments the integer value of a key by one
+// If the key doesn't exist, it's set to 0 before performing the increment
+// Returns the value after increment
 func Incr(ctx context.Context, key string) (int64, error) {
 	res, err := Client.Incr(ctx, key).Result()
 	if err != nil {
@@ -97,8 +115,9 @@ func Incr(ctx context.Context, key string) (int64, error) {
 	return res, nil
 }
 
+// Expire sets an expiration time on an existing key
+// If the key already has an expiration, it will be overwritten
 func Expire(ctx context.Context, key string, expiration time.Duration) error {
-	// Set expiration on existing key
 	err := Client.Expire(ctx, key, expiration).Err()
 	if err != nil {
 		logger.Error("Failed to set expiration on key in Redis", zap.String("key", key), zap.Error(err))

@@ -6,7 +6,8 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"errors"
-	"io"
+
+	"golang.org/x/crypto/argon2"
 )
 
 const (
@@ -15,8 +16,8 @@ const (
 	SaltSize  = 16 // Salt for key derivation
 )
 
-// Encrypt encrypts plaintext using AES-256-GCM
-// Returns base64-encoded: nonce + ciphertext
+// Encrypt encrypts plaintext using AES-256-GCM.
+// Returns base64-encoded ciphertext with embedded nonce.
 func Encrypt(plaintext string, key []byte) (string, error) {
 	// 1. Validate key size (must be 32 bytes)
 	if len(key) != KeySize {
@@ -37,7 +38,7 @@ func Encrypt(plaintext string, key []byte) (string, error) {
 
 	// 4. Generate random nonce
 	nonce := make([]byte, NonceSize)
-	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+	if _, err := rand.Read(nonce); err != nil {
 		return "", err
 	}
 
@@ -51,7 +52,8 @@ func Encrypt(plaintext string, key []byte) (string, error) {
 	return base64.StdEncoding.EncodeToString(result), nil
 }
 
-// Decrypt decrypts AES-256-GCM encrypted data
+// Decrypt decrypts AES-256-GCM encrypted data.
+// Expects base64-encoded ciphertext with embedded nonce.
 func Decrypt(ciphertext string, key []byte) (string, error) {
 	// 1. Validate key size
 	if len(key) != KeySize {
@@ -96,31 +98,86 @@ func Decrypt(ciphertext string, key []byte) (string, error) {
 	return string(plaintext), nil
 }
 
-// GenerateKey generates a random 32-byte encryption key
+// GenerateKey generates a cryptographically secure random 32-byte encryption key.
 func GenerateKey() ([]byte, error) {
 	key := make([]byte, KeySize)
-	_, err := io.ReadFull(rand.Reader, key)
+	_, err := rand.Read(key)
 	if err != nil {
 		return nil, err
 	}
 	return key, nil
 }
 
-// DeriveKey derives an encryption key from a password using Argon2
+// DeriveKey derives an encryption key from a password using Argon2id.
+// Uses hardcoded parameters: time=1, memory=64MB, threads=4.
+// TODO: Make Argon2 parameters configurable for different security requirements.
 func DeriveKey(password string, salt []byte) []byte {
-	// TODO: Implement Argon2 key derivation
-	return nil
+	return argon2.IDKey([]byte(password), salt, 1, 64*1024, 4, KeySize)
 }
 
-// EncryptWithPassword encrypts data using a password
-// Handles key derivation and salt generation internally
+// EncryptWithPassword encrypts data using a password-derived key.
+// Handles salt generation and key derivation internally.
+// Returns base64-encoded ciphertext with embedded salt and nonce.
 func EncryptWithPassword(plaintext, password string) (string, error) {
-	// TODO: Implement password-based encryption
-	return "", errors.New("not implemented")
+	// 1. Generate random salt
+	salt := make([]byte, SaltSize)
+	if _, err := rand.Read(salt); err != nil {
+		return "", err
+	}
+
+	// 2. Derive key from password + salt
+	key := DeriveKey(password, salt)
+
+	// 3. Encrypt data using the derived key
+	encrypted, err := Encrypt(plaintext, key)
+	if err != nil {
+		return "", err
+	}
+
+	// 4. Decode the encrypted data to get raw bytes
+	encryptedBytes, err := base64.StdEncoding.DecodeString(encrypted)
+	if err != nil {
+		return "", err
+	}
+
+	// 5. Prepend salt to the encrypted data (salt + nonce + ciphertext)
+	result := append(salt, encryptedBytes...)
+
+	// 6. Encode everything as base64
+	return base64.StdEncoding.EncodeToString(result), nil
 }
 
 // DecryptWithPassword decrypts data encrypted with password
+// Expects base64-encoded: salt + nonce + ciphertext
 func DecryptWithPassword(ciphertext, password string) (string, error) {
-	// TODO: Implement password-based decryption
-	return "", errors.New("not implemented")
+	// 1. Decode from base64
+	decoded, err := base64.StdEncoding.DecodeString(ciphertext)
+	if err != nil {
+		return "", err
+	}
+
+	// 2. Check minimum length (salt + nonce + some data)
+	if len(decoded) < SaltSize+NonceSize {
+		return "", errors.New("ciphertext too short")
+	}
+
+	// 3. Extract salt (first 16 bytes)
+	salt := decoded[:SaltSize]
+
+	// 4. Extract remaining data (nonce + ciphertext)
+	encryptedData := decoded[SaltSize:]
+
+	// 5. Derive key from password + salt
+	key := DeriveKey(password, salt)
+
+	// 6. Encode the encrypted data back to base64 for Decrypt function
+	encryptedString := base64.StdEncoding.EncodeToString(encryptedData)
+
+	// 7. Decrypt using the derived key
+	plaintext, err := Decrypt(encryptedString, key)
+	if err != nil {
+		return "", err
+	}
+
+	return plaintext, nil
 }

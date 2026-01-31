@@ -1,11 +1,13 @@
 package main
 
 import (
+	"btc-giftcard/internal/database"
 	"btc-giftcard/pkg/cache"
 	"btc-giftcard/pkg/logger"
 	"context"
-	"go.uber.org/zap"
 	"time"
+
+	"go.uber.org/zap"
 )
 
 func main() {
@@ -19,14 +21,14 @@ func main() {
 	logger.Debug("Debug mode enabled")
 	logger.Warn("This is a warning", zap.String("reason", "testing"))
 
-	cfg := cache.Config{
+	cacheCfg := cache.Config{
 		Host:     "localhost",
 		Port:     "6379",
 		Password: "",
 		DB:       0,
 	}
 
-	if err := cache.Init(cfg); err != nil {
+	if err := cache.Init(cacheCfg); err != nil {
 		logger.Fatal("Failed to initialize cache", zap.Error(err))
 	}
 	defer cache.Close()
@@ -53,4 +55,35 @@ func main() {
 	logger.Info("Attempt count", zap.Int64("count", count))
 
 	logger.Info("Server started successfully")
+
+	dbCfg := database.Config{
+		Host:            "localhost",
+		Port:            "5432",
+		User:            "postgres",
+		Password:        "postgres",
+		DB:              "btcgifter",
+		SslMode:         "disable",
+		MaxConns:        25,
+		MinConns:        5,
+		MaxConnLifetime: 5,
+		MaxConnIdleTime: 1,
+	}
+
+	// Initialize database
+	db, err := database.NewDB(dbCfg)
+	if err != nil {
+		logger.Fatal("Failed to initialize database connection", zap.Error(err))
+	}
+	defer db.Close()
+
+	// Test database connection
+	if err := db.Ping(ctx); err != nil {
+		logger.Fatal("Database ping failed", zap.Error(err))
+	}
+	logger.Info("Database connected and verified successfully")
+
+	// Run migrations
+	if err := db.RunMigrations(); err != nil {
+		logger.Fatal("Failed to run migrations", zap.Error(err))
+	}
 }
