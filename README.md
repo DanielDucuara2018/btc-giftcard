@@ -57,7 +57,7 @@ sequenceDiagram
     API->>DB: Save card<br/>(Status=Created, BTCAmountSats=0,<br/>purchase_email=email)
     DB-->>API: Card saved
 
-    Note over Queue: Funding Worker (async)
+    Note over Queue: Funding Worker (async - Redis Streams)
     Queue->>Exchange: Get current BTC price
     Exchange-->>Queue: $67,000 per BTC
     Queue->>Queue: Calculate: $100 / $67,000 = 0.00149254 BTC
@@ -65,7 +65,7 @@ sequenceDiagram
     Wallet-->>Queue: Transaction broadcast
     Queue->>DB: Update card<br/>(Status=Funding, BTCAmountSats=149254)
 
-    Note over Queue: Monitor Worker (async)
+    Note over Queue: Monitor Worker (async - Redis Streams)
     Queue->>Wallet: Check confirmations
     Wallet-->>Queue: 1+ confirmations
     Queue->>DB: Update card (Status=Active)
@@ -380,16 +380,14 @@ graph TB
     end
 
     subgraph "Infrastructure (pkg/)"
-        Logger[Logger]
+        Logger[Logger - Zap]
         Cache[Redis Cache]
-        Queue[RabbitMQ]
+        Queue[Redis Streams]
     end
 
     subgraph "Worker (cmd/worker)"
-        FundJob[Fund Cards]
-        RedeemJob[Process Redemptions]
-        MonitorJob[Monitor Blockchain]
-        PayoutJob[Merchant Payouts]
+        FundJob[Fund Cards Worker<br/>Consumes: fund_card stream]
+        MonitorJob[Monitor Blockchain Worker<br/>Consumes: monitor_tx stream]
     end
 
     API --> Card
@@ -400,19 +398,15 @@ graph TB
     Card --> Queue
 
     Queue --> FundJob
-    Queue --> RedeemJob
     Queue --> MonitorJob
-    Queue --> PayoutJob
 
     FundJob --> Wallet
-    RedeemJob --> Wallet
     MonitorJob --> Wallet
 ```
 
 ### External Dependencies
 
 ```
-
 ┌────────────────────────────────────────┐
 │ Bitcoin Network                        │
 │ • Testnet (development)                │
@@ -420,9 +414,10 @@ graph TB
 └────────────────────────────────────────┘
 
 ┌────────────────────────────────────────┐
-│ Exchanges                              │
-│ • Coinbase API (buy/sell BTC)          │
-│ • Binance API (backup)                 │
+│ Exchange APIs                          │
+│ • Coinbase API (BTC price)             │
+│ • CoinGecko API (BTC price - backup)   │
+│ • Bitstamp API (BTC price - backup)    │
 └────────────────────────────────────────┘
 
 ┌────────────────────────────────────────┐
@@ -433,84 +428,102 @@ graph TB
 ┌────────────────────────────────────────┐
 │ Infrastructure                         │
 │ • PostgreSQL (main database)           │
-│ • Redis (cache, rate limiting, locks)  │
-│ • RabbitMQ (async job queue)           │
+│ • Redis (cache, streams, locks)        │
 └────────────────────────────────────────┘
 
 ```
 
 ---
 
-## Message Queue (RabbitMQ) Jobs
+## Message Queue (Redis Streams)
 
-### Job Types (Per-Card Custodial Model)
+### Architecture
 
+Redis Streams provide persistent message queue with consumer groups for distributed processing.
+
+**Streams:**
+- `fund_card` - Messages to fund newly created cards
+- `monitor_tx` - Messages to track blockchain confirmations
+
+**Consumer Groups:**
+- `workers` - Consumes from `fund_card` stream
+- `monitors` - Consumes from `monitor_tx` stream
+
+### Worker Flows
+
+**fund_card Worker:**
+```
+Job: fund_card
+├─ Triggered: After card creation (consumes from fund_card stream)
+├─ Action: Buy BTC and send to card's unique wallet
+├─ Details:
+│   • Consume FundCardMessage from fund_card stream (consumer group: workers)
+│   • Fetch current BTC price from exchange provider (Coinbase/CoinGecko/Bitstamp)
+│   • Calculate BTC amount: fiat_amount_cents / price
+│   • Buy BTC from exchange (Coinbase/Kraken API)
+│   • Send BTC to card's wallet address (blockchain transaction)
+│   • Update card status: Created → Funding
+│   • Store transaction hash in database
+│   • Publish MonitorTransactionMessage to monitor_tx stream
+│   • ACK message on success
+├─ Retry: 3 times with exponential backoff (Redis Streams auto-retry)
+├─ Error Handling: Log failure, update card status to failed, notify ops team
+└─ Duration: ~10-60 minutes (blockchain confirmation)
 ```
 
-Job: fund_card
-├─ Triggered: After card creation and BTC purchase from exchange
-├─ Action: Send BTC from exchange directly to card's unique wallet (bc1q...)
-├─ Details:
-│   • Buy BTC from exchange (Coinbase/Kraken API)
-│   • Get card's wallet address from database
-│   • Send BTC to card's address (blockchain transaction)
-│   • Store transaction hash
-├─ Retry: 3 times with exponential backoff
-└─ Duration: ~10-60 minutes (blockchain confirmation)
-
-Job: redeem_card
-├─ Triggered: User requests redemption with card code + destination address
-├─ Action: Decrypt card's private key, sign transaction, send BTC to user
-├─ Details:
-│   • Validate card code and status (must be active)
-│   • Decrypt private key from database (AES-256)
-│   • Import wallet using ImportWalletFromWIF()
-│   • Create transaction to user's provided address
-│   • Sign with card's private key
-│   • Broadcast to Bitcoin network
-│   • Update card status to "redeemed"
-│   • Clear private key from memory
-├─ Retry: 3 times (only if transaction fails to broadcast)
-└─ Duration: ~10-60 minutes
-
+**monitor_tx Worker:**
+```
 Job: monitor_transaction
-├─ Triggered: After broadcasting any transaction (funding or redemption)
+├─ Triggered: After any transaction broadcast (consumes from monitor_tx stream)
 ├─ Action: Monitor blockchain for confirmations
 ├─ Details:
-│   • Query blockchain API (Blockstream/Mempool.space)
+│   • Consume MonitorTransactionMessage from monitor_tx stream (consumer group: monitors)
+│   • Query blockchain API (Blockstream/Mempool.space) for tx_hash
 │   • Check confirmation count
-│   • Update transaction status in database
-│   • Notify user when confirmed (email/webhook)
+│   • If confirmed (6+ confirmations):
+│       - Update transaction status to "confirmed" in database
+│       - Update card status to "Active"
+│       - Send confirmation email to user
+│       - ACK message
+│   • If pending (< 6 confirmations):
+│       - Re-queue message with delay (XADD with MAXLEN)
+│       - Next poll in 10 minutes
+│   • If transaction not found:
+│       - Check if mempool dropped (24h timeout)
+│       - Alert ops team if stuck
 ├─ Retry: Poll every 10 minutes until 6 confirmations
+├─ Error Handling: Log API failures, retry with backoff
 └─ Duration: ~60 minutes (6 blocks × 10 min average)
-
-Job: merchant_settlement
-├─ Triggered: Daily at midnight UTC
-├─ Action: Batch process merchant payments for in-store redemptions
-├─ Details:
-│   • Query cards redeemed at merchant locations (if implementing)
-│   • Sell accumulated BTC on exchange (if merchant wants fiat)
-│   • OR send BTC directly to merchant's wallet
-│   • Generate settlement report
-│   • Update merchant balance ledger
-├─ Retry: 3 times with notification to ops team
-└─ Duration: ~24 hours (T+1 settlement for fiat)
-
-Job: failed_funding_cleanup
-├─ Triggered: Daily scan for cards stuck in "funding" status
-├─ Action: Handle cards where funding transaction failed/stalled
-├─ Details:
-│   • Find cards in "funding" status > 24 hours
-│   • Check if transaction was broadcast but not confirmed
-│   • If failed: Mark card as "expired", refund customer
-│   • If stuck: Re-broadcast or investigate manually
-│   • Send notification to customer service
-├─ Retry: N/A (runs daily)
-└─ Duration: Manual investigation may be required
-
 ```
 
-**Note:** No hot wallet rebalancing needed in per-card model. Each card has its own dedicated wallet funded directly from exchange.
+### Message Examples
+
+**FundCardMessage:**
+```json
+{
+  "card_id": "550e8400-e29b-41d4-a716-446655440000",
+  "fiat_amount_cents": 10000,
+  "fiat_currency": "USD"
+}
+```
+
+**MonitorTransactionMessage:**
+```json
+{
+  "card_id": "550e8400-e29b-41d4-a716-446655440000",
+  "tx_hash": "abc123...",
+  "expected_amount_sats": 149254,
+  "destination_addr": "bc1q..."
+}
+```
+
+---
+
+## Documentation
+
+- [API Documentation](docs/API_DOCUMENTATION.md) - Full API reference from `go doc`
+- See `go doc -all btc-giftcard/internal/queue` for package docs
+- See `go test ./... -v` for test coverage
 
 ---
 
@@ -793,9 +806,9 @@ btc-giftcard/
 │   ├── payment/         # Payment processing
 │   └── database/        # Database layer
 ├── pkg/
-│   ├── cache/           # Redis wrapper
-│   ├── queue/           # RabbitMQ wrapper
-│   └── logger/          # Logging utilities
+│   ├── cache/           # Redis cache wrapper
+│   ├── queue/           # Redis Streams wrapper
+│   └── logger/          # Zap logging utilities
 └── config/              # Configuration files
 ```
 

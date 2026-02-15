@@ -5,14 +5,17 @@ package card
 import (
 	"btc-giftcard/internal/crypto"
 	"btc-giftcard/internal/database"
+	messages "btc-giftcard/internal/queue"
 	"btc-giftcard/internal/wallet"
 	"btc-giftcard/pkg/logger"
+	streams "btc-giftcard/pkg/queue"
 	"context"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -23,7 +26,7 @@ func init() {
 }
 
 // setupTestService creates a test service instance with database and repositories
-func setupTestService(t *testing.T, network string) (*Service, *database.DB, []byte, *database.CardRepository) {
+func setupTestService(t *testing.T, network string) (*Service, *database.DB, []byte, *database.CardRepository, *redis.Client) {
 	t.Helper()
 
 	db := database.SetupTestDB(t)
@@ -34,14 +37,30 @@ func setupTestService(t *testing.T, network string) (*Service, *database.DB, []b
 	encryptionKey, err := crypto.GenerateKey()
 	require.NoError(t, err)
 
-	service := NewService(cardRepo, txRepo, encryptionKey, network)
+	// Setup Redis for queue
+	redisClient := redis.NewClient(&redis.Options{
+		Addr: "localhost:6379",
+		DB:   1, // Use DB 1 for tests to avoid conflicts
+	})
 
-	return service, db, encryptionKey, cardRepo
+	// Clear test stream
+	ctx := context.Background()
+	redisClient.Del(ctx, "fund_card")
+
+	// Create queue
+	queue := streams.NewStreamQueue(redisClient)
+	err = queue.DeclareStream(ctx, "fund_card", "test_workers")
+	require.NoError(t, err)
+
+	service := NewService(cardRepo, txRepo, encryptionKey, network, queue)
+
+	return service, db, encryptionKey, cardRepo, redisClient
 }
 
 func TestService_CreateCard(t *testing.T) {
-	service, db, encryptionKey, cardRepo := setupTestService(t, "testnet")
+	service, db, encryptionKey, cardRepo, redisClient := setupTestService(t, "testnet")
 	defer db.Close()
+	defer redisClient.Close()
 	defer database.CleanupTestDB(t, db)
 
 	ctx := context.Background()
@@ -93,11 +112,31 @@ func TestService_CreateCard(t *testing.T) {
 	importedWallet, err := wallet.ImportWalletFromWIF(decryptedWIF, "testnet")
 	require.NoError(t, err)
 	assert.Equal(t, savedCard.WalletAddress, importedWallet.Address)
+
+	// Verify message was published to queue
+	time.Sleep(100 * time.Millisecond) // Give Redis time to process
+
+	result, err := redisClient.XRead(ctx, &redis.XReadArgs{
+		Streams: []string{"fund_card", "0"},
+		Count:   1,
+	}).Result()
+	require.NoError(t, err)
+	require.Len(t, result, 1)
+	require.Len(t, result[0].Messages, 1)
+
+	// Verify message content
+	msgData := result[0].Messages[0].Values["data"].(string)
+	msg, err := messages.FromJSONFundCard([]byte(msgData))
+	require.NoError(t, err)
+	assert.Equal(t, resp.CardID, msg.CardID)
+	assert.Equal(t, int64(10000), msg.FiatAmountCents)
+	assert.Equal(t, "USD", msg.FiatCurrency)
 }
 
 func TestService_CreateCard_WithoutOptionalFields(t *testing.T) {
-	service, db, _, cardRepo := setupTestService(t, "testnet")
+	service, db, _, cardRepo, redisClient := setupTestService(t, "testnet")
 	defer db.Close()
+	defer redisClient.Close()
 	defer database.CleanupTestDB(t, db)
 
 	ctx := context.Background()
@@ -128,8 +167,9 @@ func TestService_CreateCard_WithoutOptionalFields(t *testing.T) {
 }
 
 func TestService_CreateCard_GeneratesUniqueCode(t *testing.T) {
-	service, db, _, _ := setupTestService(t, "testnet")
+	service, db, _, _, redisClient := setupTestService(t, "testnet")
 	defer db.Close()
+	defer redisClient.Close()
 	defer database.CleanupTestDB(t, db)
 
 	ctx := context.Background()
@@ -155,8 +195,9 @@ func TestService_CreateCard_GeneratesUniqueCode(t *testing.T) {
 }
 
 func TestService_CreateCard_GeneratesUniqueWallets(t *testing.T) {
-	service, db, _, cardRepo := setupTestService(t, "testnet")
+	service, db, _, cardRepo, redisClient := setupTestService(t, "testnet")
 	defer db.Close()
+	defer redisClient.Close()
 	defer database.CleanupTestDB(t, db)
 
 	ctx := context.Background()
@@ -191,8 +232,9 @@ func TestService_CreateCard_GeneratesUniqueWallets(t *testing.T) {
 }
 
 func TestService_CreateCard_MainnetWallets(t *testing.T) {
-	service, db, encryptionKey, cardRepo := setupTestService(t, "mainnet")
+	service, db, encryptionKey, cardRepo, redisClient := setupTestService(t, "mainnet")
 	defer db.Close()
+	defer redisClient.Close()
 	defer database.CleanupTestDB(t, db)
 
 	ctx := context.Background()
@@ -226,8 +268,9 @@ func TestService_CreateCard_MainnetWallets(t *testing.T) {
 }
 
 func TestService_CreateCard_AllFieldsPopulated(t *testing.T) {
-	service, db, _, cardRepo := setupTestService(t, "testnet")
+	service, db, _, cardRepo, redisClient := setupTestService(t, "testnet")
 	defer db.Close()
+	defer redisClient.Close()
 	defer database.CleanupTestDB(t, db)
 
 	ctx := context.Background()
@@ -268,8 +311,9 @@ func TestService_CreateCard_AllFieldsPopulated(t *testing.T) {
 }
 
 func TestService_CreateCard_CodeExcludesConfusingCharacters(t *testing.T) {
-	service, db, _, _ := setupTestService(t, "testnet")
+	service, db, _, _, redisClient := setupTestService(t, "testnet")
 	defer db.Close()
+	defer redisClient.Close()
 	defer database.CleanupTestDB(t, db)
 
 	ctx := context.Background()
@@ -297,8 +341,9 @@ func TestService_CreateCard_CodeExcludesConfusingCharacters(t *testing.T) {
 }
 
 func TestService_generateCardCode_RetriesOnDuplicate(t *testing.T) {
-	service, db, _, cardRepo := setupTestService(t, "testnet")
+	service, db, _, cardRepo, redisClient := setupTestService(t, "testnet")
 	defer db.Close()
+	defer redisClient.Close()
 	defer database.CleanupTestDB(t, db)
 
 	ctx := context.Background()
@@ -335,8 +380,9 @@ func TestService_generateCardCode_RetriesOnDuplicate(t *testing.T) {
 }
 
 func TestService_CreateCard_ResponseDoesNotIncludePrivateKey(t *testing.T) {
-	service, db, _, _ := setupTestService(t, "testnet")
+	service, db, _, _, redisClient := setupTestService(t, "testnet")
 	defer db.Close()
+	defer redisClient.Close()
 	defer database.CleanupTestDB(t, db)
 
 	ctx := context.Background()

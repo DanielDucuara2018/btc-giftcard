@@ -1,9 +1,13 @@
 package card
 
 import (
+	messages "btc-giftcard/internal/queue"
+	streams "btc-giftcard/pkg/queue"
+
 	"btc-giftcard/internal/crypto"
 	"btc-giftcard/internal/database"
 	"btc-giftcard/internal/wallet"
+	"btc-giftcard/pkg/logger"
 	"context"
 	"crypto/rand"
 	"errors"
@@ -12,6 +16,7 @@ import (
 
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/google/uuid"
+	"go.uber.org/zap"
 )
 
 // Custom errors for card operations
@@ -29,6 +34,7 @@ type Service struct {
 	txRepo        *database.TransactionRepository
 	encryptionKey []byte // Master key for encrypting private keys (from env/KMS)
 	network       string // "testnet" or "mainnet"
+	queue         *streams.StreamQueue
 }
 
 // NewService creates a new card service instance
@@ -37,12 +43,14 @@ func NewService(
 	txRepo *database.TransactionRepository,
 	encryptionKey []byte,
 	network string,
+	queue *streams.StreamQueue,
 ) *Service {
 	return &Service{
 		cardRepo:      cardRepo,
 		txRepo:        txRepo,
 		encryptionKey: encryptionKey,
 		network:       network,
+		queue:         queue,
 	}
 }
 
@@ -121,7 +129,34 @@ func (s *Service) CreateCard(ctx context.Context, req CreateCardRequest) (*Creat
 		return nil, fmt.Errorf("failed to save card: %w", err)
 	}
 
-	// 6. Return response (DO NOT include encrypted private key)
+	// 6. Publish FundCardMessage to queue (don't fail card creation if this fails)
+	msg := messages.FundCardMessage{
+		CardID:          card.ID,
+		FiatAmountCents: card.FiatAmountCents,
+		FiatCurrency:    card.FiatCurrency,
+	}
+
+	msgJSON, err := msg.ToJSON()
+	if err != nil {
+		logger.Error("Failed to serialize FundCardMessage",
+			zap.String("card_id", card.ID),
+			zap.Error(err),
+		)
+	} else {
+		_, err = s.queue.Publish(ctx, "fund_card", msgJSON)
+		if err != nil {
+			logger.Error("Failed to publish FundCardMessage",
+				zap.String("card_id", card.ID),
+				zap.Error(err),
+			)
+		} else {
+			logger.Info("Published FundCardMessage",
+				zap.String("card_id", card.ID),
+			)
+		}
+	}
+
+	// 7. Return response (DO NOT include encrypted private key)
 	return &CreateCardResponse{
 		CardID:        card.ID,
 		Code:          card.Code,
