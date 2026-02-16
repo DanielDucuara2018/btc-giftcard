@@ -1,0 +1,17 @@
+[database]
+host = "localhost"
+port = "5432"
+user = "postgres"
+password = "postgres"
+db = "btcgifter"
+ssl_mode = "disable"
+max_conns = 25
+min_conns = 5
+max_conn_lifetime = 5
+max_conn_idle_time = 1
+
+[redis]
+host = "localhost"
+port = "6379"
+password = ""
+db = 0
