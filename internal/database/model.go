@@ -126,8 +126,6 @@ type Card struct {
 	PurchaseEmail      string     `json:"purchase_email" db:"purchase_email"`
 	OwnerEmail         string     `json:"owner_email" db:"owner_email"`
 	Code               string     `json:"code" db:"code"`
-	WalletAddress      string     `json:"wallet_address" db:"wallet_address"`
-	EncryptedPrivKey   string     `json:"-" db:"encrypted_priv_key"`
 	BTCAmountSats      int64      `json:"btc_amount_sats" db:"btc_amount_sats"`     // Satoshis (1 BTC = 100,000,000 sats)
 	FiatAmountCents    int64      `json:"fiat_amount_cents" db:"fiat_amount_cents"` // Cents (e.g., $100.50 = 10050)
 	FiatCurrency       string     `json:"fiat_currency" db:"fiat_currency"`
@@ -154,18 +152,22 @@ func (c *Card) GetPurchasePrice() float64 {
 }
 
 type Transaction struct {
-	ID            string            `json:"id" db:"id"`
-	CardID        string            `json:"card_id" db:"card_id"`
-	Type          Type              `json:"type" db:"type"`
-	TxHash        *string           `json:"tx_hash,omitempty" db:"tx_hash"`           // NULL before broadcast
-	FromAddress   *string           `json:"from_address,omitempty" db:"from_address"` // NULL in some cases
-	ToAddress     *string           `json:"to_address,omitempty" db:"to_address"`     // NULL in some cases
-	BTCAmountSats int64             `json:"btc_amount_sats" db:"btc_amount_sats"`     // Satoshis
-	Status        TransactionStatus `json:"status" db:"status"`
-	Confirmations int               `json:"confirmations" db:"confirmations"`
-	CreatedAt     time.Time         `json:"created_at" db:"created_at"`
-	BroadcastAt   *time.Time        `json:"broadcast_at,omitempty" db:"broadcast_at"` // When sent to blockchain
-	ConfirmedAt   *time.Time        `json:"confirmed_at,omitempty" db:"confirmed_at"` // When confirmed
+	ID               string            `json:"id" db:"id"`
+	CardID           string            `json:"card_id" db:"card_id"`
+	Type             Type              `json:"type" db:"type"`
+	RedemptionMethod *string           `json:"redemption_method,omitempty" db:"redemption_method"` // 'lightning' or 'onchain'
+	TxHash           *string           `json:"tx_hash,omitempty" db:"tx_hash"`                     // On-chain tx hash (NULL for Lightning)
+	PaymentHash      *string           `json:"payment_hash,omitempty" db:"payment_hash"`           // Lightning payment hash (NULL for on-chain)
+	PaymentPreimage  *string           `json:"payment_preimage,omitempty" db:"payment_preimage"`   // Lightning proof of payment (set on success)
+	LightningInvoice *string           `json:"lightning_invoice,omitempty" db:"lightning_invoice"` // BOLT11 invoice (NULL for on-chain)
+	FromAddress      *string           `json:"from_address,omitempty" db:"from_address"`           // Source Bitcoin address (on-chain)
+	ToAddress        *string           `json:"to_address,omitempty" db:"to_address"`               // Destination Bitcoin address (on-chain)
+	BTCAmountSats    int64             `json:"btc_amount_sats" db:"btc_amount_sats"`               // Satoshis
+	Status           TransactionStatus `json:"status" db:"status"`
+	Confirmations    int               `json:"confirmations" db:"confirmations"`
+	CreatedAt        time.Time         `json:"created_at" db:"created_at"`
+	BroadcastAt      *time.Time        `json:"broadcast_at,omitempty" db:"broadcast_at"` // When sent to blockchain
+	ConfirmedAt      *time.Time        `json:"confirmed_at,omitempty" db:"confirmed_at"` // When confirmed
 }
 
 // GetBTC returns BTC amount as float64 for display (e.g., 0.00152345)

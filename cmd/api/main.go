@@ -1,35 +1,58 @@
 package main
 
 import (
+	"btc-giftcard/config"
 	"btc-giftcard/internal/database"
 	"btc-giftcard/pkg/cache"
 	"btc-giftcard/pkg/logger"
 	"context"
+	"fmt"
+	"os"
 	"time"
 
+	"path/filepath"
+	"runtime"
+
+	"github.com/jinzhu/copier"
 	"go.uber.org/zap"
 )
 
+var Cfg config.ApiConfig
+
 func main() {
+	if err := run(); err != nil {
+		fmt.Fprintf(os.Stderr, "fatal: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func run() error {
 	// Initialize logger
 	if err := logger.Init(logger.GetEnv()); err != nil {
-		panic(err)
+		return fmt.Errorf("failed to initialize logger: %w", err)
 	}
-	defer logger.Sync() // Flush logs before exit
+	defer logger.Sync()
+
+	_, filename, _, _ := runtime.Caller(0)
+
+	root := filepath.Dir(filepath.Dir(filepath.Dir(filename)))
+	configPath := config.Path(root).Join("config.toml")
+
+	if err := config.Load(configPath, &Cfg); err != nil {
+		return fmt.Errorf("failed to load config: %w", err)
+	}
 
 	logger.Info("Server starting", zap.Int("port", 8080))
 	logger.Debug("Debug mode enabled")
 	logger.Warn("This is a warning", zap.String("reason", "testing"))
 
-	cacheCfg := cache.Config{
-		Host:     "localhost",
-		Port:     "6379",
-		Password: "",
-		DB:       0,
+	// Initialize cache with automatic field mapping
+	var redisCfg cache.Config
+	if err := copier.Copy(&redisCfg, &Cfg.Redis); err != nil {
+		return fmt.Errorf("failed to copy cache config: %w", err)
 	}
-
-	if err := cache.Init(cacheCfg); err != nil {
-		logger.Fatal("Failed to initialize cache", zap.Error(err))
+	if err := cache.Init(redisCfg); err != nil {
+		return fmt.Errorf("failed to initialize cache: %w", err)
 	}
 	defer cache.Close()
 
@@ -56,34 +79,27 @@ func main() {
 
 	logger.Info("Server started successfully")
 
-	dbCfg := database.Config{
-		Host:            "localhost",
-		Port:            "5432",
-		User:            "postgres",
-		Password:        "postgres",
-		DB:              "btcgifter",
-		SslMode:         "disable",
-		MaxConns:        25,
-		MinConns:        5,
-		MaxConnLifetime: 5,
-		MaxConnIdleTime: 1,
+	// Initialize database with automatic field mapping
+	var dbCfg database.Config
+	if err := copier.Copy(&dbCfg, &Cfg.Database); err != nil {
+		return fmt.Errorf("failed to copy database config: %w", err)
 	}
-
-	// Initialize database
 	db, err := database.NewDB(dbCfg)
 	if err != nil {
-		logger.Fatal("Failed to initialize database connection", zap.Error(err))
+		return fmt.Errorf("failed to initialize database connection: %w", err)
 	}
 	defer db.Close()
 
 	// Test database connection
 	if err := db.Ping(ctx); err != nil {
-		logger.Fatal("Database ping failed", zap.Error(err))
+		return fmt.Errorf("database ping failed: %w", err)
 	}
 	logger.Info("Database connected and verified successfully")
 
 	// Run migrations
 	if err := db.RunMigrations(); err != nil {
-		logger.Fatal("Failed to run migrations", zap.Error(err))
+		return fmt.Errorf("failed to run migrations: %w", err)
 	}
+
+	return nil
 }

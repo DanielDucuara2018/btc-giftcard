@@ -10,8 +10,6 @@ CREATE TABLE IF NOT EXISTS cards (
     purchase_email VARCHAR(255) NOT NULL,        -- email for receipt and account claiming
     owner_email VARCHAR(255) NOT NULL,           -- email for card ownership
     code VARCHAR(50) UNIQUE NOT NULL,            -- Redemption code (e.g., GIFT-XXXX-YYYY-ZZZZ)
-    wallet_address VARCHAR(100) UNIQUE NOT NULL, -- Bitcoin address (bc1q... or tb1...)
-    encrypted_priv_key TEXT NOT NULL,            -- AES-256-GCM encrypted private key (WIF format)
     btc_amount_sats BIGINT NOT NULL DEFAULT 0,   -- Bitcoin amount in satoshis (1 BTC = 100,000,000 sats)
     fiat_amount_cents BIGINT NOT NULL,           -- Fiat value in cents (e.g., $100.50 = 10050)
     fiat_currency VARCHAR(3) NOT NULL DEFAULT 'USD', -- ISO 4217 currency code
@@ -27,9 +25,13 @@ CREATE TABLE IF NOT EXISTS transactions (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     card_id UUID NOT NULL,
     type transaction_type DEFAULT 'fund' NOT NULL,
-    tx_hash VARCHAR(64) UNIQUE NULL,             -- Bitcoin transaction ID (NULL before broadcast)
-    from_address VARCHAR(100) NULL,              -- Source Bitcoin address
-    to_address VARCHAR(100) NULL,                -- Destination Bitcoin address
+    redemption_method TEXT NULL,                 -- 'lightning' or 'onchain' (per transaction)
+    tx_hash VARCHAR(64) UNIQUE NULL,             -- Bitcoin on-chain tx hash (NULL for Lightning)
+    payment_hash VARCHAR(64) UNIQUE NULL,        -- Lightning payment hash (NULL for on-chain)
+    payment_preimage VARCHAR(64) NULL,           -- Lightning proof of payment (set on success)
+    lightning_invoice TEXT NULL,                  -- BOLT11 invoice string (NULL for on-chain)
+    from_address VARCHAR(100) NULL,              -- Source Bitcoin address (on-chain)
+    to_address VARCHAR(100) NULL,                -- Destination Bitcoin address (on-chain)
     btc_amount_sats BIGINT NOT NULL,             -- Amount in satoshis
     status transaction_status DEFAULT 'pending' NOT NULL,
     confirmations INT NOT NULL DEFAULT 0,        -- Blockchain confirmations (0-6+)
@@ -46,7 +48,6 @@ CREATE INDEX IF NOT EXISTS idx_cards_user_id ON cards(user_id) WHERE user_id IS 
 CREATE INDEX IF NOT EXISTS idx_cards_purchase_email ON cards(purchase_email) WHERE purchase_email IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_cards_owner_email ON cards(owner_email) WHERE owner_email IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_cards_status ON cards(status);
-CREATE INDEX IF NOT EXISTS idx_cards_wallet_address ON cards(wallet_address);
 CREATE INDEX IF NOT EXISTS idx_cards_created_at ON cards(created_at DESC);
 
 CREATE INDEX IF NOT EXISTS idx_transactions_card_id ON transactions(card_id);

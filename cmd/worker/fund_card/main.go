@@ -4,259 +4,328 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/signal"
+	"path/filepath"
+	"runtime"
+	"syscall"
+	"time"
 
+	"btc-giftcard/config"
+	"btc-giftcard/internal/database"
+	"btc-giftcard/internal/exchange"
+	messages "btc-giftcard/internal/queue"
+	"btc-giftcard/pkg/cache"
 	"btc-giftcard/pkg/logger"
+	streams "btc-giftcard/pkg/queue"
 
+	"github.com/google/uuid"
+	"github.com/jinzhu/copier"
 	"go.uber.org/zap"
 )
 
+var Cfg config.ApiConfig
+
 func main() {
+	if err := run(); err != nil {
+		fmt.Fprintf(os.Stderr, "fatal: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func run() error {
 	// Initialize logger
 	if err := logger.Init("development"); err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to initialize logger: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("failed to initialize logger: %w", err)
+	}
+	defer logger.Sync()
+
+	// Load configuration
+	_, filename, _, _ := runtime.Caller(0)
+	root := filepath.Dir(filepath.Dir(filepath.Dir(filepath.Dir(filename))))
+	configPath := config.Path(root).Join("config.toml")
+
+	if err := config.Load(configPath, &Cfg); err != nil {
+		return fmt.Errorf("failed to load config: %w", err)
 	}
 
 	logger.Info("Starting fund_card worker...")
 
 	// ========================================================================
-	// BTC ACQUISITION STRATEGY (Choose one - implement before this worker)
+	// CUSTODIAL FUNDING MODEL
 	// ========================================================================
 	//
-	// OPTION 1: Stripe + Hot Wallet (Recommended for MVP)
-	// ────────────────────────────────────────────────────
-	// • GUI: User pays $100 via Stripe (credit card)
-	// • BTC Source: Hot wallet (YOUR treasury address on blockchain)
-	//   - One-time setup: Generate hot wallet address (bc1q...)
-	//   - Monthly refill: Buy BTC on exchange → Withdraw to hot wallet
-	//   - This worker: Transfer from hot wallet → card wallets
-	// • Env needed: HOT_WALLET_WIF (encrypted private key)
+	// This worker processes FundCardMessage from Redis queue.
+	// Funding is PURE ACCOUNTING — no blockchain transaction happens here.
 	//
-	// OPTION 3: Payment Processor + Treasury
-	// ───────────────────────────────────────
-	// • GUI: User pays $100 via Coinbase Commerce / BTCPay / Strike
-	// • BTC Source: Payment processor auto-converts USD → BTC
-	//   - BTC arrives at YOUR treasury address
-	//   - This worker: Transfer from treasury → card wallets
-	// • Env needed: TREASURY_WALLET_WIF (encrypted private key)
+	// BTC is pre-purchased via OTC (Crypto.com OTC 2.0) and held in treasury
+	// (Lightning channels + on-chain hot wallet). Cards are balance claims.
 	//
-	// ⚠️  NOTE: This worker does NOT buy BTC from exchanges
-	// ⚠️  BTC must already be in hot wallet / treasury before running
+	// Flow:
+	//   1. API creates card (Status=Created, BTCAmountSats=0)
+	//   2. API publishes FundCardMessage to "fund_card" Redis stream
+	//   3. THIS WORKER:
+	//      → Fetch BTC price from OTC provider (our actual cost basis)
+	//      → Calculate satoshis for the card's fiat value
+	//      → Check treasury has enough available balance (prevent overselling)
+	//      → Reserve balance: Update card BTCAmountSats + Status=Active
+	//      → Create Fund transaction record (accounting only, no tx_hash)
+	//   4. Card is now active and spendable by the user
+	//
+	// ⚠️  NO on-chain tx, NO wallet generation, NO private keys
+	// ⚠️  BTC only moves when user REDEEMS (Lightning or on-chain)
 	// ========================================================================
 
-	// TODO: Initialize all dependencies needed for worker
-	//
-	// 1. Setup Redis client for queue
-	//    - redisClient := redis.NewClient(&redis.Options{...})
-	//    - Use getEnv() for REDIS_HOST, REDIS_PASSWORD, REDIS_DB
-	//    - Test connection with Ping()
-	//    - defer redisClient.Close()
-	//
-	// 2. Setup database connection
-	//    - db := database.NewDB(host, port, user, password, dbname)
-	//    - Use getEnv() for all DB connection params
-	//    - defer db.Close()
-	//
-	// 3. Create repositories
-	//    - cardRepo := database.NewCardRepository(db)
-	//    - txRepo := database.NewTransactionRepository(db)
-	//
-	// 4. Create exchange provider for BTC price (fetch only)
-	//    - httpClient := &http.Client{Timeout: 10 * time.Second}
-	//    - priceProvider := exchange.NewProvider("coinbase", "", httpClient)
-	//    - Used to calculate satoshis from fiat amount
-	//
-	// 5. Load hot wallet / treasury private key (32 bytes for AES-256)
-	//    - hotWalletWIF := getEnv("HOT_WALLET_WIF", "")
-	//    - Import wallet: wallet.ImportWalletFromWIF(hotWalletWIF, network)
-	//    - This is the SOURCE of BTC for funding cards
-	//
-	// 6. Load encryption key for card private keys
-	//    - encryptionKey := []byte(getEnv("ENCRYPTION_KEY", ""))
-	//    - Validate length is 32 bytes
+	// Initialize Redis
+	var redisCfg cache.Config
+	if err := copier.Copy(&redisCfg, &Cfg.Redis); err != nil {
+		return fmt.Errorf("failed to copy cache config: %w", err)
+	}
+	if err := cache.Init(redisCfg); err != nil {
+		return fmt.Errorf("failed to initialize cache: %w", err)
+	}
+	defer cache.Close()
 
-	// TODO: Setup queue
-	// - queue := streams.NewStreamQueue(redisClient)
-	// - streamName := "fund_card"
-	// - groupName := "workers"
-	// - consumerName := fmt.Sprintf("worker-%d", time.Now().Unix())
-	// - Declare stream: queue.DeclareStream(ctx, streamName, groupName)
+	// Initialize database
+	var dbCfg database.Config
+	if err := copier.Copy(&dbCfg, &Cfg.Database); err != nil {
+		return fmt.Errorf("failed to copy database config: %w", err)
+	}
+	db, err := database.NewDB(dbCfg)
+	if err != nil {
+		return fmt.Errorf("failed to initialize database connection: %w", err)
+	}
+	defer db.Close()
 
-	// TODO: Setup graceful shutdown
-	// - sigChan := make(chan os.Signal, 1)
-	// - signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-	// - ctx, cancel := context.WithCancel(context.Background())
-	// - defer cancel()
-	//
-	// - Start consumer in goroutine:
-	//   go func() {
-	//       err := queue.Consume(ctx, streamName, groupName, consumerName,
-	//           func(messageID string, data []byte) error {
-	//               return processMessage(ctx, messageID, data)
-	//           })
-	//       if err != nil && err != context.Canceled {
-	//           logger.Error("Consumer error", zap.Error(err))
-	//       }
-	//   }()
-	//
-	// - Wait for shutdown: sig := <-sigChan
-	// - Cancel context: cancel()
-	// - Wait for cleanup: time.Sleep(5 * time.Second)
+	// Create repositories
+	cardRepo := database.NewCardRepository(db)
+	txRepo := database.NewTransactionRepository(db)
 
-	logger.Info("Worker not yet implemented - add your code here")
-}
+	// Create OTC price provider
+	// TODO: Switch to "cryptocom_otc" provider once implemented
+	// This reflects our actual BTC cost basis (not a random public exchange)
+	// Fallback chain: OTC provider → Coinbase → CoinGecko
+	provider, err := exchange.NewProvider("coinbase", "", nil)
+	if err != nil {
+		return fmt.Errorf("failed to initialize exchange provider: %w", err)
+	}
 
-// processMessage handles a single fund_card message
-// This is the core business logic that processes each card funding request
-//
-// ========================================================================
-// FUNDING FLOW (for both Option 1 and Option 3)
-// ========================================================================
-//  1. User pays $100 (Stripe or Payment Processor - handled by GUI)
-//  2. Card created with Status=Created, BTCAmountSats=0
-//  3. FundCardMessage published to queue
-//  4. THIS WORKER processes message:
-//     → Fetch BTC price
-//     → Calculate satoshis
-//     → Transfer from HOT WALLET/TREASURY → Card wallet (on-chain tx)
-//     → Update card Status=Active, BTCAmountSats=X
-//  5. MonitorTransactionMessage published for confirmation tracking
-//
-// ========================================================================
-func processMessage(ctx context.Context, messageID string, data []byte) error {
-	logger.Info("Processing message", zap.String("messageID", messageID))
-
-	// TODO: Implement message processing logic
+	// TODO: Load treasury config
+	//    - treasuryTotalSats: total BTC held (Lightning channels + hot wallet)
+	//    - Available = treasuryTotalSats - SUM(unredeemed card balances)
+	//    - Replace with treasury service that queries LND + hot wallet in real-time
 	//
-	// Step 1: Deserialize and validate message
-	//   - msg, err := messages.FromJSONFundCard(data)
-	//   - if err != nil { return fmt.Errorf("invalid message: %w", err) }
-	//   - if err := msg.Validate(); err != nil { return err }
-	//   - Log card_id, fiat_amount_cents, fiat_currency
+	// IMPLEMENT: Initialize LND client from config
+	//   var lndCfg lnd.Config
+	//   lndCfg.GRPCHost     = Cfg.LND.GRPCHost          // "gift-card-backend.lnd:10009"
+	//   lndCfg.TLSCertPath  = Cfg.LND.TLSCertPath       // "./lnd-data/tls.cert"
+	//   lndCfg.MacaroonPath = Cfg.LND.MacaroonPath       // "./lnd-data/admin.macaroon"
+	//   lndCfg.Network      = Cfg.LND.Network            // "testnet"
 	//
-	// Step 2: Fetch card from database
-	//   - card, err := cardRepo.GetByID(ctx, msg.CardID)
-	//   - if err != nil { return err }
-	//   - Check if card.Status == database.Created
-	//   - If not Created, log warning and return nil (skip, already processed)
-	//
-	// Step 3: Update card status to Funding (prevents duplicate processing)
-	//   - card.Status = database.Funding
-	//   - if err := cardRepo.Update(ctx, card); err != nil { return err }
-	//   - Log status change
-	//
-	// Step 4: Fetch current BTC price from exchange provider
-	//   - price, err := priceProvider.GetPrice(ctx, msg.FiatCurrency)
-	//   - if err != nil { return err } // Retry on exchange API failure
-	//   - logger.Info("BTC price fetched", zap.Float64("price", price), zap.String("currency", msg.FiatCurrency))
-	//
-	// Step 5: Calculate BTC amount in satoshis
-	//   - fiatAmount := float64(msg.FiatAmountCents) / 100.0  // $50.00
-	//   - btcAmount := fiatAmount / price                     // 0.00074627 BTC
-	//   - satoshis := int64(btcAmount * 100_000_000)         // 74627 sats
-	//   - logger.Info("Calculated BTC amount", zap.Int64("satoshis", satoshis), zap.Float64("btc", btcAmount))
-	//
-	// Step 6: Send BTC from hot wallet/treasury to card's unique wallet
-	//   ┌────────────────────────────────────────────────────────────┐
-	//   │ OPTION 1 (MVP - Mock): Generate fake txHash for testing   │
-	//   ├────────────────────────────────────────────────────────────┤
-	//   │ txHash := fmt.Sprintf("mock_tx_%s_%d",                     │
-	//   │     card.ID[:8], time.Now().Unix())                        │
-	//   │ logger.Warn("MOCK: Would send BTC",                        │
-	//   │     zap.String("from", "hot_wallet"),                      │
-	//   │     zap.String("to", card.WalletAddress),                  │
-	//   │     zap.Int64("satoshis", satoshis))                       │
-	//   └────────────────────────────────────────────────────────────┘
-	//
-	//   ┌────────────────────────────────────────────────────────────┐
-	//   │ OPTION 2 (Production): Real on-chain BTC transfer         │
-	//   ├────────────────────────────────────────────────────────────┤
-	//   │ // Import hot wallet from environment                      │
-	//   │ hotWalletWIF := os.Getenv("HOT_WALLET_WIF")               │
-	//   │ hotWallet, err := wallet.ImportWalletFromWIF(              │
-	//   │     hotWalletWIF, network)                                 │
-	//   │ if err != nil { return err }                               │
-	//   │                                                            │
-	//   │ // Create and broadcast transaction                        │
-	//   │ txHash, err := hotWallet.SendBTC(                          │
-	//   │     card.WalletAddress, satoshis)                          │
-	//   │ if err != nil {                                            │
-	//   │     logger.Error("Failed to send BTC", zap.Error(err))     │
-	//   │     // TODO: Update card status to Failed?                 │
-	//   │     return err                                             │
-	//   │ }                                                          │
-	//   │                                                            │
-	//   │ logger.Info("BTC sent on-chain",                           │
-	//   │     zap.String("txhash", txHash),                          │
-	//   │     zap.String("to", card.WalletAddress))                  │
-	//   └────────────────────────────────────────────────────────────┘
-	//
-	// Step 7: Update card with BTC amount and funding timestamp
-	//   - now := time.Now().UTC()
-	//   - card.BTCAmountSats = satoshis
-	//   - card.FundedAt = &now
-	//   - if err := cardRepo.Update(ctx, card); err != nil { return err }
-	//   - logger.Info("Card updated with BTC amount", zap.String("card_id", card.ID))
-	//
-	// Step 8: Create transaction record in database
-	//   - now := time.Now().UTC()
-	//   - tx := &database.Transaction{
-	//       ID:            uuid.New().String(),
-	//       CardID:        card.ID,
-	//       Type:          database.Fund,
-	//       TxHash:        txHash,
-	//       FromAddress:   "", // Hot wallet address (optional)
-	//       ToAddress:     card.WalletAddress,
-	//       BTCAmountSats: satoshis,
-	//       Status:        database.Pending,
-	//       Confirmations: 0,
-	//       CreatedAt:     now,
-	//       BroadcastAt:   &now,
+	//   lndClient, err := lnd.NewClient(lndCfg)
+	//   if err != nil {
+	//       return fmt.Errorf("failed to connect to LND: %w", err)
 	//   }
-	//   - if err := txRepo.Create(ctx, tx); err != nil { return err }
+	//   defer lndClient.Close()
 	//
-	// Step 9: Publish MonitorTransactionMessage to monitor_tx stream
-	//   - monitorMsg := messages.MonitorTransactionMessage{
-	//       CardID:             card.ID,
-	//       TxHash:             txHash,
-	//       ExpectedAmountSats: satoshis,
-	//       DestinationAddr:    card.WalletAddress,
-	//   }
-	//   - monitorJSON, err := monitorMsg.ToJSON()
-	//   - if err != nil { return err }
-	//   - if _, err := queue.Publish(ctx, "monitor_tx", monitorJSON); err != nil {
-	//       logger.Error("Failed to publish monitor message", zap.Error(err))
-	//       return err
-	//   }
-	//   - logger.Info("Published MonitorTransactionMessage", zap.String("txhash", txHash))
+	//   // Verify LND is synced at startup
+	//   info, err := lndClient.GetInfo(ctx)
+	//   logger.Info("Connected to LND",
+	//       zap.String("alias", info.Alias),
+	//       zap.Bool("synced", info.SyncedToChain),
+	//       zap.Uint32("block_height", info.BlockHeight),
+	//   )
 	//
-	// Error handling strategy:
-	//   - Return error → Retry (transient failures like DB down, exchange API timeout)
-	//   - Return nil → Skip (permanent failures like invalid card status)
-	//   - Log all errors with appropriate context (card_id, messageID, etc.)
+	// Then pass lndClient to newMessageHandler() so processMessage can check treasury balance.
 
-	logger.Info("Message processed successfully", zap.String("messageID", messageID))
+	// Setup queue consumer
+	queue := streams.NewStreamQueue(cache.Client)
+	streamName := "fund_card"
+	groupName := "fund_workers"
+	consumerName := fmt.Sprintf("fund-worker-%d", time.Now().Unix())
+
+	// Graceful shutdown context
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := queue.DeclareStream(ctx, streamName, groupName); err != nil {
+		return fmt.Errorf("failed to declare the consumer group: %w", err)
+	}
+
+	// Start consumer goroutine
+	handler := newMessageHandler(cardRepo, txRepo, provider)
+
+	go func() {
+		err := queue.Consume(ctx, streamName, groupName, consumerName,
+			func(messageID string, data []byte) error {
+				return handler.processMessage(ctx, messageID, data)
+			})
+		if err != nil && err != context.Canceled {
+			logger.Error("Consumer error", zap.Error(err))
+		}
+	}()
+
+	logger.Info("Fund card worker is running, waiting for messages...",
+		zap.String("stream", streamName),
+		zap.String("group", groupName),
+		zap.String("consumer", consumerName),
+	)
+
+	// Wait for shutdown signal
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+
+	sig := <-sigChan
+	logger.Info("Received shutdown signal", zap.String("signal", sig.String()))
+
+	// Cancel context to stop consumer
+	cancel()
+
+	// Give the consumer time to finish processing current message
+	time.Sleep(3 * time.Second)
+	logger.Info("Fund card worker shut down gracefully")
+
 	return nil
 }
 
-// getEnv gets environment variable with default value
-func getEnv(key, defaultValue string) string {
-	value := os.Getenv(key)
-	if value == "" {
-		return defaultValue
-	}
-	return value
+// messageHandler holds the dependencies needed by processMessage.
+type messageHandler struct {
+	cardRepo *database.CardRepository
+	txRepo   *database.TransactionRepository
+	provider exchange.PriceProvider
 }
 
-// getEnvInt gets environment variable as int with default value
-func getEnvInt(key string, defaultValue int) int {
-	value := os.Getenv(key)
-	if value == "" {
-		return defaultValue
+func newMessageHandler(
+	cardRepo *database.CardRepository,
+	txRepo *database.TransactionRepository,
+	provider exchange.PriceProvider,
+) *messageHandler {
+	return &messageHandler{
+		cardRepo: cardRepo,
+		txRepo:   txRepo,
+		provider: provider,
 	}
-	var intValue int
-	if _, err := fmt.Sscanf(value, "%d", &intValue); err != nil {
-		return defaultValue
+}
+
+// processMessage handles a single FundCardMessage from the queue.
+//
+// ========================================================================
+// CUSTODIAL FUNDING FLOW (pure accounting — no blockchain tx)
+// ========================================================================
+//  1. User pays €100 (bank transfer / Stripe — handled by API)
+//  2. Card created with Status=Created, BTCAmountSats=0
+//  3. FundCardMessage published to "fund_card" queue
+//  4. THIS WORKER processes message:
+//     → Fetch BTC price from OTC provider (our cost basis)
+//     → Calculate satoshis (e.g., €95 after fee / €67,000 = 141,791 sats)
+//     → Check treasury available balance ≥ satoshis needed
+//     → Update card: BTCAmountSats=141791, Status=Active, FundedAt=now
+//     → Create Transaction record (Type=Fund, no tx_hash — just accounting)
+//  5. Card is now active — user can spend (Lightning or on-chain)
+//
+// ⚠️  No MonitorTransactionMessage needed — no on-chain tx to monitor
+// ========================================================================
+func (h *messageHandler) processMessage(ctx context.Context, messageID string, data []byte) error {
+	logger.Info("Processing fund_card message", zap.String("messageID", messageID))
+
+	// Deserialize and validate message
+	msg, err := messages.FromJSONFundCard(data)
+	if err != nil {
+		return fmt.Errorf("invalid message: %w", err)
 	}
-	return intValue
+	logger.Info("Received message", zap.String("card_id", msg.CardID), zap.Int64("fiat_amount_cents", msg.FiatAmountCents), zap.String("fiat_currency", msg.FiatCurrency))
+
+	// Fetch card from database and validate state
+	card, err := h.cardRepo.GetByID(ctx, msg.CardID)
+	if err != nil {
+		return fmt.Errorf("error fetching card: %w", err)
+	}
+	if card.Status != database.Created {
+		logger.Warn("Card already processed, skipping", zap.String("card_id", card.ID), zap.String("status", card.Status.String()))
+		return nil // Idempotent: skip already-funded cards
+	}
+
+	// Set card status to Funding (prevents duplicate processing)
+	err = h.cardRepo.Update(ctx, card.ID, database.Funding, nil, nil, nil)
+	if err != nil {
+		return fmt.Errorf("failed to set funding status: %w", err)
+	}
+
+	// Fetch BTC price from OTC provider (TODO check if it's better to fetch crypto.com price)
+	price, err := h.provider.GetPrice(ctx, msg.FiatCurrency)
+	if err != nil {
+		return fmt.Errorf("error fetching BTC price: %w", err)
+	}
+	logger.Info("BTC price from OTC provider", zap.Float64("price", price), zap.String("currency", msg.FiatCurrency))
+
+	// Calculate BTC amount in satoshis
+	fiatAmount := float64(msg.FiatAmountCents) / 100.0
+	btcAmount := fiatAmount / price
+	satoshis := int64(btcAmount * 100_000_000)
+	if satoshis <= 0 {
+		logger.Error("Calculated 0 sats — price too high or amount too low")
+		return nil // Permanent failure, don't retry
+	}
+
+	// Check treasury has enough available balance
+	// IMPLEMENT using LND client (passed via messageHandler):
+	//
+	//   1. Get Lightning channel balance:
+	//      channelBal, err := h.lndClient.GetChannelBalance(ctx)
+	//      lightningAvailable := channelBal.LocalSats
+	//
+	//   2. Get on-chain wallet balance:
+	//      walletBal, err := h.lndClient.GetWalletBalance(ctx)
+	//      onChainAvailable := walletBal.ConfirmedSats
+	//
+	//   3. Calculate total treasury:
+	//      totalTreasury := lightningAvailable + onChainAvailable
+	//
+	//   4. Query total reserved balance (sum of active + funding cards):
+	//      SELECT COALESCE(SUM(btc_amount_sats), 0) FROM cards WHERE status IN ('active','funding')
+	//      → totalReserved
+	//      (TODO: add a GetTotalReservedBalance method to CardRepository)
+	//
+	//   5. available := totalTreasury - totalReserved
+	//      if available < satoshis {
+	//          logger.Error("Treasury insufficient",
+	//              zap.Int64("needed", satoshis),
+	//              zap.Int64("available", available),
+	//          )
+	//          // Revert card to Created so it can be retried later
+	//          h.cardRepo.Update(ctx, card.ID, database.Created, nil, nil, nil)
+	//          return fmt.Errorf("treasury insufficient: need %d sats, have %d available", satoshis, available)
+	//      }
+	//
+	//   CONCURRENCY: Use Redis distributed lock to prevent race conditions
+	//      lockKey := "treasury:reserve_lock"
+	//      acquired, err := cache.Client.SetNX(ctx, lockKey, consumerID, 5*time.Second).Result()
+	//      if !acquired { return retry }
+	//      defer cache.Client.Del(ctx, lockKey)
+	//      // ... check balance and reserve inside the lock ...
+
+	// Update card — reserve the balance (this IS the funding)
+	now := time.Now().UTC()
+	if err := h.cardRepo.Update(ctx, card.ID, database.Active, &satoshis, &now, nil); err != nil {
+		return fmt.Errorf("failed to activate card: %w", err)
+	}
+	logger.Info("Card funded (balance reserved)", zap.String("card_id", card.ID), zap.Int64("satoshis", satoshis))
+
+	// Step 8: Create Fund transaction record (accounting only — no blockchain tx)
+	now = time.Now().UTC()
+	tx := &database.Transaction{
+		ID:            uuid.New().String(),
+		CardID:        card.ID,
+		Type:          database.Fund,
+		BTCAmountSats: satoshis,
+		Status:        database.Confirmed,
+		Confirmations: 0,
+		CreatedAt:     now,
+		ConfirmedAt:   &now,
+	}
+	if err := h.txRepo.Create(ctx, tx); err != nil {
+		logger.Error("Failed to create fund transaction", zap.Error(err))
+	}
+
+	logger.Info("Message processed successfully", zap.String("messageID", messageID))
+	return nil
 }

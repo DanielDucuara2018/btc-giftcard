@@ -33,8 +33,12 @@ func (r *TransactionRepository) Create(ctx context.Context, tx *Transaction) err
 	query := `INSERT INTO transactions (
 		id,
 		card_id, 
-		type, 
-		tx_hash, 
+		type,
+		redemption_method,
+		tx_hash,
+		payment_hash,
+		payment_preimage,
+		lightning_invoice,
 		from_address, 
 		to_address,
 		btc_amount_sats,
@@ -44,7 +48,7 @@ func (r *TransactionRepository) Create(ctx context.Context, tx *Transaction) err
 		broadcast_at,
 		confirmed_at
 		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)`
 
 	_, err := r.db.Exec(
 		ctx,
@@ -52,7 +56,11 @@ func (r *TransactionRepository) Create(ctx context.Context, tx *Transaction) err
 		tx.ID,
 		tx.CardID,
 		tx.Type.String(),
+		tx.RedemptionMethod,
 		tx.TxHash,
+		tx.PaymentHash,
+		tx.PaymentPreimage,
+		tx.LightningInvoice,
 		tx.FromAddress,
 		tx.ToAddress,
 		tx.BTCAmountSats,
@@ -74,7 +82,8 @@ func (r *TransactionRepository) Create(ctx context.Context, tx *Transaction) err
 // Returns ErrTransactionNotFound if the ID does not exist.
 func (r *TransactionRepository) GetByID(ctx context.Context, id string) (*Transaction, error) {
 	query := `SELECT 
-		id, card_id, type, tx_hash, from_address, to_address,
+		id, card_id, type, redemption_method, tx_hash, payment_hash, payment_preimage,
+		lightning_invoice, from_address, to_address,
 		btc_amount_sats, status, confirmations, created_at,
 		broadcast_at, confirmed_at
     FROM transactions WHERE id = $1`
@@ -87,7 +96,11 @@ func (r *TransactionRepository) GetByID(ctx context.Context, id string) (*Transa
 		&transaction.ID,
 		&transaction.CardID,
 		&typeStr,
+		&transaction.RedemptionMethod,
 		&transaction.TxHash,
+		&transaction.PaymentHash,
+		&transaction.PaymentPreimage,
+		&transaction.LightningInvoice,
 		&transaction.FromAddress,
 		&transaction.ToAddress,
 		&transaction.BTCAmountSats,
@@ -114,7 +127,8 @@ func (r *TransactionRepository) GetByID(ctx context.Context, id string) (*Transa
 // Returns ErrTransactionNotFound if no transaction with that hash exists.
 func (r *TransactionRepository) GetByTxHash(ctx context.Context, txHash string) (*Transaction, error) {
 	query := `SELECT 
-		id, card_id, type, tx_hash, from_address, to_address,
+		id, card_id, type, redemption_method, tx_hash, payment_hash, payment_preimage,
+		lightning_invoice, from_address, to_address,
 		btc_amount_sats, status, confirmations, created_at,
 		broadcast_at, confirmed_at
     FROM transactions WHERE tx_hash = $1`
@@ -127,7 +141,11 @@ func (r *TransactionRepository) GetByTxHash(ctx context.Context, txHash string) 
 		&transaction.ID,
 		&transaction.CardID,
 		&typeStr,
+		&transaction.RedemptionMethod,
 		&transaction.TxHash,
+		&transaction.PaymentHash,
+		&transaction.PaymentPreimage,
+		&transaction.LightningInvoice,
 		&transaction.FromAddress,
 		&transaction.ToAddress,
 		&transaction.BTCAmountSats,
@@ -154,7 +172,8 @@ func (r *TransactionRepository) GetByTxHash(ctx context.Context, txHash string) 
 // Returns an empty slice if the card has no transactions.
 func (r *TransactionRepository) ListByCardID(ctx context.Context, cardID string) ([]*Transaction, error) {
 	query := `SELECT 
-		id, card_id, type, tx_hash, from_address, to_address,
+		id, card_id, type, redemption_method, tx_hash, payment_hash, payment_preimage,
+		lightning_invoice, from_address, to_address,
 		btc_amount_sats, status, confirmations, created_at,
 		broadcast_at, confirmed_at
     FROM transactions WHERE card_id = $1 ORDER BY created_at DESC`
@@ -175,7 +194,11 @@ func (r *TransactionRepository) ListByCardID(ctx context.Context, cardID string)
 			&transaction.ID,
 			&transaction.CardID,
 			&typeStr,
+			&transaction.RedemptionMethod,
 			&transaction.TxHash,
+			&transaction.PaymentHash,
+			&transaction.PaymentPreimage,
+			&transaction.LightningInvoice,
 			&transaction.FromAddress,
 			&transaction.ToAddress,
 			&transaction.BTCAmountSats,

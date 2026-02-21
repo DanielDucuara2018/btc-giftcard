@@ -16,8 +16,6 @@ var (
 	ErrCardNotFound = errors.New("card not found")
 	// ErrCardCodeExists is returned when trying to create a card with an existing code
 	ErrCardCodeExists = errors.New("card code already exists")
-	// ErrCardAddressExists is returned when trying to create a card with an existing wallet address
-	ErrCardAddressExists = errors.New("wallet address already exists")
 )
 
 // CardRepository handles all database operations for cards
@@ -34,7 +32,6 @@ func NewCardRepository(db *DB) *CardRepository {
 
 // Create inserts a new card into the database.
 // Returns ErrCardCodeExists if the code already exists.
-// Returns ErrCardAddressExists if the wallet address already exists.
 func (r *CardRepository) Create(ctx context.Context, card *Card) error {
 	query := `INSERT INTO cards (
 		id,
@@ -42,8 +39,6 @@ func (r *CardRepository) Create(ctx context.Context, card *Card) error {
 		purchase_email,
 		owner_email, 
 		code, 
-		wallet_address, 
-		encrypted_priv_key,
 		btc_amount_sats,
 		fiat_amount_cents,
 		fiat_currency,
@@ -53,7 +48,7 @@ func (r *CardRepository) Create(ctx context.Context, card *Card) error {
 		funded_at,
 		redeemed_at
 		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`
 
 	_, err := r.db.Exec(
 		ctx,
@@ -63,8 +58,6 @@ func (r *CardRepository) Create(ctx context.Context, card *Card) error {
 		card.PurchaseEmail,
 		card.OwnerEmail,
 		card.Code,
-		card.WalletAddress,
-		card.EncryptedPrivKey,
 		card.BTCAmountSats,
 		card.FiatAmountCents,
 		card.FiatCurrency,
@@ -83,9 +76,6 @@ func (r *CardRepository) Create(ctx context.Context, card *Card) error {
 				if pgErr.ConstraintName == "cards_code_key" {
 					return ErrCardCodeExists
 				}
-				if pgErr.ConstraintName == "cards_wallet_address_key" {
-					return ErrCardAddressExists
-				}
 			}
 		}
 		return fmt.Errorf("failed to create card: %w", err)
@@ -98,7 +88,7 @@ func (r *CardRepository) Create(ctx context.Context, card *Card) error {
 // Returns ErrCardNotFound if the code does not exist.
 func (r *CardRepository) GetByCode(ctx context.Context, code string) (*Card, error) {
 	query := `SELECT 
-        id, user_id, purchase_email, owner_email, code, wallet_address, encrypted_priv_key,
+        id, user_id, purchase_email, owner_email, code,
         btc_amount_sats, fiat_amount_cents, fiat_currency, purchase_price_cents,
         status, created_at, funded_at, redeemed_at
     FROM cards WHERE code = $1`
@@ -112,8 +102,6 @@ func (r *CardRepository) GetByCode(ctx context.Context, code string) (*Card, err
 		&card.PurchaseEmail,
 		&card.OwnerEmail,
 		&card.Code,
-		&card.WalletAddress,
-		&card.EncryptedPrivKey,
 		&card.BTCAmountSats,
 		&card.FiatAmountCents,
 		&card.FiatCurrency,
@@ -139,7 +127,7 @@ func (r *CardRepository) GetByCode(ctx context.Context, code string) (*Card, err
 // Returns ErrCardNotFound if the ID does not exist.
 func (r *CardRepository) GetByID(ctx context.Context, id string) (*Card, error) {
 	query := `SELECT 
-        id, user_id, purchase_email, owner_email, code, wallet_address, encrypted_priv_key,
+        id, user_id, purchase_email, owner_email, code,
         btc_amount_sats, fiat_amount_cents, fiat_currency, purchase_price_cents,
         status, created_at, funded_at, redeemed_at
     FROM cards WHERE id = $1`
@@ -153,8 +141,6 @@ func (r *CardRepository) GetByID(ctx context.Context, id string) (*Card, error) 
 		&card.PurchaseEmail,
 		&card.OwnerEmail,
 		&card.Code,
-		&card.WalletAddress,
-		&card.EncryptedPrivKey,
 		&card.BTCAmountSats,
 		&card.FiatAmountCents,
 		&card.FiatCurrency,
@@ -179,14 +165,15 @@ func (r *CardRepository) GetByID(ctx context.Context, id string) (*Card, error) 
 // Update updates a card's status and related timestamps.
 // Uses COALESCE to preserve existing timestamp values when nil is passed.
 // Returns ErrCardNotFound if the card ID does not exist.
-func (r *CardRepository) Update(ctx context.Context, id string, status CardStatus, fundedAt, redeemedAt *time.Time) error {
+func (r *CardRepository) Update(ctx context.Context, id string, status CardStatus, BTCAmountSats *int64, fundedAt, redeemedAt *time.Time) error {
 	query := `UPDATE cards 
 		SET status = $2,
-			funded_at = COALESCE($3, funded_at),
-			redeemed_at = COALESCE($4, redeemed_at)
+			btc_amount_sats = COALESCE($3, btc_amount_sats),
+			funded_at = COALESCE($4, funded_at),
+			redeemed_at = COALESCE($5, redeemed_at)
 		WHERE id = $1`
 
-	commandTag, err := r.db.Exec(ctx, query, id, status.String(), fundedAt, redeemedAt)
+	commandTag, err := r.db.Exec(ctx, query, id, status.String(), BTCAmountSats, fundedAt, redeemedAt)
 	if err != nil {
 		return fmt.Errorf("failed to update card with id %s: %w", id, err)
 	}
@@ -202,7 +189,7 @@ func (r *CardRepository) Update(ctx context.Context, id string, status CardStatu
 // Returns an empty slice if the user has no cards.
 func (r *CardRepository) ListByUserID(ctx context.Context, userID string) ([]*Card, error) {
 	query := `SELECT 
-        id, user_id, purchase_email, owner_email, code, wallet_address, encrypted_priv_key,
+        id, user_id, purchase_email, owner_email, code,
         btc_amount_sats, fiat_amount_cents, fiat_currency, purchase_price_cents,
         status, created_at, funded_at, redeemed_at
     FROM cards WHERE user_id = $1 ORDER BY created_at DESC`
@@ -224,8 +211,6 @@ func (r *CardRepository) ListByUserID(ctx context.Context, userID string) ([]*Ca
 			&card.PurchaseEmail,
 			&card.OwnerEmail,
 			&card.Code,
-			&card.WalletAddress,
-			&card.EncryptedPrivKey,
 			&card.BTCAmountSats,
 			&card.FiatAmountCents,
 			&card.FiatCurrency,

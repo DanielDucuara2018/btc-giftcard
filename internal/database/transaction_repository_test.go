@@ -31,9 +31,9 @@ func TestTransactionRepository_Create(t *testing.T) {
 	cardID := uuid.New().String()
 	card := &Card{
 		ID:                 cardID,
+		PurchaseEmail:      "test@example.com",
+		OwnerEmail:         "test@example.com",
 		Code:               "TX-TEST-CARD",
-		WalletAddress:      "tb1qtxtest",
-		EncryptedPrivKey:   "encrypted_key",
 		BTCAmountSats:      100000,
 		FiatAmountCents:    5000,
 		FiatCurrency:       "USD",
@@ -47,13 +47,14 @@ func TestTransactionRepository_Create(t *testing.T) {
 	// Create a transaction
 	txID := uuid.New().String()
 	now := time.Now().UTC()
+	toAddr := "tb1qtestaddr"
 	tx := &Transaction{
 		ID:            txID,
 		CardID:        cardID,
 		Type:          Fund,
 		TxHash:        nil, // Not broadcast yet
 		FromAddress:   nil,
-		ToAddress:     &card.WalletAddress,
+		ToAddress:     &toAddr,
 		BTCAmountSats: 100000,
 		Status:        Pending,
 		Confirmations: 0,
@@ -90,9 +91,9 @@ func TestTransactionRepository_Create_WithTxHash(t *testing.T) {
 	cardID := uuid.New().String()
 	card := &Card{
 		ID:                 cardID,
+		PurchaseEmail:      "test@example.com",
+		OwnerEmail:         "test@example.com",
 		Code:               "TX-HASH-TEST",
-		WalletAddress:      "tb1qtxhashtest",
-		EncryptedPrivKey:   "encrypted_key",
 		BTCAmountSats:      100000,
 		FiatAmountCents:    5000,
 		FiatCurrency:       "USD",
@@ -106,6 +107,7 @@ func TestTransactionRepository_Create_WithTxHash(t *testing.T) {
 	// Create transaction with tx_hash (broadcast transaction)
 	txHash := "a1b2c3d4e5f67890123456789012345678901234567890123456789012345678"
 	fromAddr := "tb1qfromaddress"
+	toAddr := "tb1qtoaddress"
 	broadcastTime := time.Now().UTC()
 
 	tx := &Transaction{
@@ -114,7 +116,7 @@ func TestTransactionRepository_Create_WithTxHash(t *testing.T) {
 		Type:          Fund,
 		TxHash:        &txHash,
 		FromAddress:   &fromAddr,
-		ToAddress:     &card.WalletAddress,
+		ToAddress:     &toAddr,
 		BTCAmountSats: 100000,
 		Status:        Pending,
 		Confirmations: 0,
@@ -175,9 +177,9 @@ func TestTransactionRepository_ListByCardID(t *testing.T) {
 	cardID := uuid.New().String()
 	card := &Card{
 		ID:                 cardID,
+		PurchaseEmail:      "test@example.com",
+		OwnerEmail:         "test@example.com",
 		Code:               "LIST-TX-TEST",
-		WalletAddress:      "tb1qlisttxtest",
-		EncryptedPrivKey:   "encrypted_key",
 		BTCAmountSats:      100000,
 		FiatAmountCents:    5000,
 		FiatCurrency:       "USD",
@@ -189,6 +191,7 @@ func TestTransactionRepository_ListByCardID(t *testing.T) {
 	require.NoError(t, err)
 
 	// Create multiple transactions
+	toAddr := "tb1qtestaddr"
 	for i := 0; i < 3; i++ {
 		tx := &Transaction{
 			ID:            uuid.New().String(),
@@ -196,7 +199,7 @@ func TestTransactionRepository_ListByCardID(t *testing.T) {
 			Type:          Fund,
 			TxHash:        nil,
 			FromAddress:   nil,
-			ToAddress:     &card.WalletAddress,
+			ToAddress:     &toAddr,
 			BTCAmountSats: int64(10000 * (i + 1)),
 			Status:        Pending,
 			Confirmations: 0,
@@ -249,9 +252,9 @@ func TestTransactionRepository_Update(t *testing.T) {
 	cardID := uuid.New().String()
 	card := &Card{
 		ID:                 cardID,
+		PurchaseEmail:      "test@example.com",
+		OwnerEmail:         "test@example.com",
 		Code:               "UPDATE-TX-TEST",
-		WalletAddress:      "tb1qupdatetxtest",
-		EncryptedPrivKey:   "encrypted_key",
 		BTCAmountSats:      100000,
 		FiatAmountCents:    5000,
 		FiatCurrency:       "USD",
@@ -264,13 +267,14 @@ func TestTransactionRepository_Update(t *testing.T) {
 
 	// Create transaction
 	txID := uuid.New().String()
+	toAddr := "tb1qtestaddr"
 	tx := &Transaction{
 		ID:            txID,
 		CardID:        cardID,
 		Type:          Fund,
 		TxHash:        nil,
 		FromAddress:   nil,
-		ToAddress:     &card.WalletAddress,
+		ToAddress:     &toAddr,
 		BTCAmountSats: 100000,
 		Status:        Pending,
 		Confirmations: 0,
@@ -334,9 +338,9 @@ func TestTransactionRepository_MultipleTypes(t *testing.T) {
 	cardID := uuid.New().String()
 	card := &Card{
 		ID:                 cardID,
+		PurchaseEmail:      "test@example.com",
+		OwnerEmail:         "test@example.com",
 		Code:               "TYPES-TEST",
-		WalletAddress:      "tb1qtypestest",
-		EncryptedPrivKey:   "encrypted_key",
 		BTCAmountSats:      100000,
 		FiatAmountCents:    5000,
 		FiatCurrency:       "USD",
@@ -348,6 +352,7 @@ func TestTransactionRepository_MultipleTypes(t *testing.T) {
 	require.NoError(t, err)
 
 	// Create transactions of different types
+	toAddr := "tb1qtestaddr"
 	types := []Type{Fund, Redeem, Payment}
 	for _, txType := range types {
 		tx := &Transaction{
@@ -356,7 +361,7 @@ func TestTransactionRepository_MultipleTypes(t *testing.T) {
 			Type:          txType,
 			TxHash:        nil,
 			FromAddress:   nil,
-			ToAddress:     &card.WalletAddress,
+			ToAddress:     &toAddr,
 			BTCAmountSats: 100000,
 			Status:        Pending,
 			Confirmations: 0,
@@ -396,9 +401,9 @@ func TestTransactionRepository_MultipleStatuses(t *testing.T) {
 	cardID := uuid.New().String()
 	card := &Card{
 		ID:                 cardID,
+		PurchaseEmail:      "test@example.com",
+		OwnerEmail:         "test@example.com",
 		Code:               "STATUS-TEST",
-		WalletAddress:      "tb1qstatustest",
-		EncryptedPrivKey:   "encrypted_key",
 		BTCAmountSats:      100000,
 		FiatAmountCents:    5000,
 		FiatCurrency:       "USD",
@@ -410,6 +415,7 @@ func TestTransactionRepository_MultipleStatuses(t *testing.T) {
 	require.NoError(t, err)
 
 	// Create transactions with different statuses
+	toAddr := "tb1qtestaddr"
 	statuses := []TransactionStatus{Pending, Confirmed, Failed}
 	for _, status := range statuses {
 		tx := &Transaction{
@@ -418,7 +424,7 @@ func TestTransactionRepository_MultipleStatuses(t *testing.T) {
 			Type:          Fund,
 			TxHash:        nil,
 			FromAddress:   nil,
-			ToAddress:     &card.WalletAddress,
+			ToAddress:     &toAddr,
 			BTCAmountSats: 100000,
 			Status:        status,
 			Confirmations: 0,
