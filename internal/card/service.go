@@ -1,7 +1,9 @@
 package card
 
 import (
+	"btc-giftcard/internal/lnd"
 	messages "btc-giftcard/internal/queue"
+	"btc-giftcard/pkg/cache"
 	streams "btc-giftcard/pkg/queue"
 
 	"btc-giftcard/internal/database"
@@ -10,6 +12,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/google/uuid"
@@ -18,44 +21,141 @@ import (
 
 // Custom errors for card operations
 var (
-	ErrCardNotFound      = errors.New("card not found")
-	ErrCardNotActive     = errors.New("card is not active")
-	ErrCardAlreadyUsed   = errors.New("card has already been redeemed")
-	ErrInvalidAddress    = errors.New("invalid bitcoin address")
-	ErrInsufficientFunds = errors.New("insufficient funds on card")
+	ErrCardNotFound        = errors.New("card not found")
+	ErrCardNotActive       = errors.New("card is not active")
+	ErrCardAlreadyUsed     = errors.New("card has already been redeemed")
+	ErrInvalidAddress      = errors.New("invalid bitcoin address")
+	ErrInsufficientFunds   = errors.New("insufficient funds on card")
+	ErrInsufficientBalance = errors.New("insufficient treasury balance")
+	ErrTreasuryLockBusy    = errors.New("treasury lock is held by another process")
 )
 
-// Service handles gift card business logic
-// TODO: Add lndClient field of type lnd.LightningClient (the interface from internal/lnd/client.go)
-//   - This enables Lightning payments (card redemption via invoice)
-//   - This enables on-chain sends (card redemption to BTC address)
-//   - This enables treasury balance checks (prevent overselling)
-//   - Inject via NewService constructor; nil-check at startup
+// Treasury cache and lock constants
+const (
+	treasuryAvailableCacheKey = "treasury:available_sats"
+	treasuryAvailableCacheTTL = 10 * time.Second
+	treasuryLockKey           = "treasury:lock"
+	treasuryLockTTL           = 5 * time.Second
+)
+
+// Service handles gift card business logic.
 type Service struct {
-	cardRepo *database.CardRepository
-	txRepo   *database.TransactionRepository
-	network  string // "testnet" or "mainnet"
-	queue    *streams.StreamQueue
-	// TODO: Add the following field:
-	// lndClient lnd.LightningClient
+	cardRepo  *database.CardRepository
+	txRepo    *database.TransactionRepository
+	network   string // "testnet" or "mainnet"
+	queue     *streams.StreamQueue
+	lndClient *lnd.Client
 }
 
-// NewService creates a new card service instance
-// TODO: Add lndClient lnd.LightningClient parameter
-//   - Store in s.lndClient
-//   - Update all callers (cmd/api/main.go, tests) to pass the LND client
-//   - For tests, create a mock implementation of LightningClient interface
+// NewService creates a new card service instance.
 func NewService(
 	cardRepo *database.CardRepository,
 	txRepo *database.TransactionRepository,
 	network string,
 	queue *streams.StreamQueue,
+	lndClient *lnd.Client,
 ) *Service {
 	return &Service{
-		cardRepo: cardRepo,
-		txRepo:   txRepo,
-		network:  network,
-		queue:    queue,
+		cardRepo:  cardRepo,
+		txRepo:    txRepo,
+		network:   network,
+		queue:     queue,
+		lndClient: lndClient,
+	}
+}
+
+// GetTreasuryAvailableBalance returns the available treasury balance (total LND
+// holdings minus reserved card balances). Results are cached in Redis for 10s
+// to avoid hitting LND (~50-100ms latency) on every call.
+func (s *Service) GetTreasuryAvailableBalance(ctx context.Context) (int64, error) {
+	// Try cache first
+	if cached, err := cache.Get(ctx, treasuryAvailableCacheKey); err == nil && cached != "" {
+		if val, parseErr := strconv.ParseInt(cached, 10, 64); parseErr == nil {
+			return val, nil
+		}
+		// Invalid cache value — fall through to recompute
+	}
+
+	// Compute from LND + DB
+	available, err := s.computeTreasuryBalance(ctx)
+	if err != nil {
+		return 0, err
+	}
+
+	// Cache the result (best-effort, don't fail on cache error)
+	if cacheErr := cache.Set(ctx, treasuryAvailableCacheKey, strconv.FormatInt(available, 10), treasuryAvailableCacheTTL); cacheErr != nil {
+		logger.Warn("failed to cache treasury balance", zap.Error(cacheErr))
+	}
+
+	return available, nil
+}
+
+// computeTreasuryBalance fetches LND balances and DB reserved amounts
+// to calculate the available treasury balance without caching.
+func (s *Service) computeTreasuryBalance(ctx context.Context) (int64, error) {
+	channelBal, err := s.lndClient.GetChannelBalance(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get channel balance: %w", err)
+	}
+
+	walletBal, err := s.lndClient.GetWalletBalance(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get wallet balance: %w", err)
+	}
+
+	totalTreasury := channelBal.LocalSats + walletBal.ConfirmedSats
+
+	totalReserved, err := s.cardRepo.GetTotalReservedBalance(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("failed to fetch total reserved balance: %w", err)
+	}
+
+	available := totalTreasury - totalReserved
+	if available < 0 {
+		logger.Error("treasury oversold: available balance is negative",
+			zap.Int64("total_treasury", totalTreasury),
+			zap.Int64("total_reserved", totalReserved),
+		)
+		return 0, ErrInsufficientBalance
+	}
+
+	return available, nil
+}
+
+// AcquireTreasuryLock acquires a distributed lock for treasury reserve operations.
+// Used by fund_card workers to prevent race conditions when multiple workers
+// try to reserve balance simultaneously:
+//
+//	acquired, err := s.AcquireTreasuryLock(ctx)
+//	if !acquired { /* another worker is reserving */ }
+//	defer s.ReleaseTreasuryLock(ctx)
+//	balance, _ := s.GetTreasuryAvailableBalance(ctx)
+//	// ... reserve card ...
+//
+// Returns true if the lock was acquired, false if another process holds it.
+func (s *Service) AcquireTreasuryLock(ctx context.Context) (bool, error) {
+	acquired, err := cache.SetNX(ctx, treasuryLockKey, "locked", treasuryLockTTL)
+	if err != nil {
+		return false, fmt.Errorf("failed to acquire treasury lock: %w", err)
+	}
+	if !acquired {
+		return false, ErrTreasuryLockBusy
+	}
+	return true, nil
+}
+
+// ReleaseTreasuryLock releases the distributed treasury lock.
+func (s *Service) ReleaseTreasuryLock(ctx context.Context) {
+	if _, err := cache.Delete(ctx, treasuryLockKey); err != nil {
+		logger.Warn("failed to release treasury lock", zap.Error(err))
+	}
+}
+
+// InvalidateTreasuryCache removes the cached treasury balance.
+// Call after card funding or redemption to force a fresh computation.
+func (s *Service) InvalidateTreasuryCache(ctx context.Context) {
+	if _, err := cache.Delete(ctx, treasuryAvailableCacheKey); err != nil {
+		logger.Warn("failed to invalidate treasury cache", zap.Error(err))
 	}
 }
 

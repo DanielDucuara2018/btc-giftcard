@@ -235,3 +235,17 @@ func (r *CardRepository) ListByUserID(ctx context.Context, userID string) ([]*Ca
 
 	return cards, nil
 }
+
+// GetTotalReservedBalance returns the sum of btc_amount_sats for all cards
+// with status 'active' or 'funding'. These represent reserved treasury funds.
+func (r *CardRepository) GetTotalReservedBalance(ctx context.Context) (int64, error) {
+	query := `SELECT COALESCE(SUM(btc_amount_sats), 0) FROM cards WHERE status IN ('active', 'funding')`
+
+	var totalReservedBalance int64
+	err := r.db.QueryRow(ctx, query).Scan(&totalReservedBalance)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get total reserved balance: %w", err)
+	}
+
+	return totalReservedBalance, nil
+}

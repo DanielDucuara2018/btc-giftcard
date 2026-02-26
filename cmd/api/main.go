@@ -35,8 +35,8 @@ func run() error {
 
 	_, filename, _, _ := runtime.Caller(0)
 
-	root := filepath.Dir(filepath.Dir(filepath.Dir(filename)))
-	configPath := config.Path(root).Join("config.toml")
+	root := filepath.Dir(filename)
+	configPath := config.Path(root).Join("config.toml", "..", "..")
 
 	if err := config.Load(configPath, &Cfg); err != nil {
 		return fmt.Errorf("failed to load config: %w", err)

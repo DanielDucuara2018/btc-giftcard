@@ -78,3 +78,6 @@ dump.rdb
 # Application specific
 /bin/
 *.pid
+
+# LND credentials (TLS cert + macaroon — sensitive!)
+lnd-creds/

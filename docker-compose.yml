@@ -76,6 +76,43 @@ services:
       retries: 3
       start_period: 5s
 
+  # =========================================================================
+  # FIRST-TIME SETUP:
+  # =========================================================================
+  #   1. Start LND: docker compose up -d lnd
+  #   2. Wait ~10s for LND to generate TLS cert + macaroons
+  #   3. Copy certs to host: ./scripts/copy-lnd-creds.sh
+  #   4. Set paths in config.toml [lnd] section:
+  #        tls_cert_path = "./lnd-creds/tls.cert"
+  #        macaroon_path = "./lnd-creds/admin.macaroon"
+  #   5. For production: remove --noseedbackup, use `lncli create` to set
+  #      a wallet password, and use `lncli unlock` on restarts (or use
+  #      --wallet-unlock-password-file for automation)
+  # =========================================================================
+  lnd:
+    image: lightninglabs/lnd:v0.18.4-beta
+    networks:
+      gift_card_bridge:
+        ipv4_address: 169.254.12.5
+        aliases:
+          - "gift-card-backend.lnd"
+    ports:
+      - "9735:9735"    # P2P Lightning port
+      - "10009:10009"  # gRPC API (used by our Go services)
+      - "8080:8080"    # REST API (optional, useful for debugging)
+    volumes:
+      - lnd_data:/root/.lnd
+    command:
+      - "--bitcoin.active"
+      - "--bitcoin.testnet"        # TODO: switch to --bitcoin.mainnet for production
+      - "--bitcoin.node=neutrino"  # lightweight SPV mode (no full bitcoind needed)
+      - "--rpclisten=0.0.0.0:10009"
+      - "--restlisten=0.0.0.0:8080"
+      - "--tlsextradomain=lnd"
+      - "--tlsextraip=169.254.12.5"
+      - "--noseedbackup"           # TODO: REMOVE in production — auto-creates wallet without seed backup
+
 volumes:
-  redis_data:
   postgres_data:
+  redis_data:
+  lnd_data:
