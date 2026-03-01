@@ -33,7 +33,7 @@ func (m *mockTreasuryLNClient) GetInfo(ctx context.Context, in *lnrpc.GetInfoReq
 func newTreasuryTestClient(mock *mockTreasuryLNClient) *Client {
 	return &Client{
 		lnClient: mock,
-		cfg:      Config{},
+		Cfg:      Config{},
 	}
 }
 

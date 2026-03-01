@@ -4,121 +4,34 @@ import (
 	"time"
 )
 
-// Define a new type for the enum
-type CardStatus int
-type Type int
-type TransactionStatus int
+// CardStatus represents the lifecycle state of a gift card.
+type CardStatus string
 
-// Define the constants using iota
+// TransactionType represents the kind of transaction.
+type TransactionType string
+
+// TransactionStatus represents the state of a transaction.
+type TransactionStatus string
+
 const (
-	Created CardStatus = iota
-	Funding
-	Active
-	Redeemed
-	Expired
+	Created  CardStatus = "created"
+	Funding  CardStatus = "funding"
+	Active   CardStatus = "active"
+	Redeemed CardStatus = "redeemed"
+	Expired  CardStatus = "expired"
 )
 
 const (
-	Fund Type = iota
-	Redeem
-	Payment
+	Fund    TransactionType = "fund"
+	Redeem  TransactionType = "redeem"
+	Payment TransactionType = "payment"
 )
 
 const (
-	Pending TransactionStatus = iota
-	Confirmed
-	Failed
+	Pending   TransactionStatus = "pending"
+	Confirmed TransactionStatus = "confirmed"
+	Failed    TransactionStatus = "failed"
 )
-
-// String converts Status to database string value
-// This method is called automatically by fmt.Print, JSON marshaling, etc.
-func (s CardStatus) String() string {
-	switch s {
-	case Created:
-		return "created"
-	case Funding:
-		return "funding"
-	case Active:
-		return "active"
-	case Redeemed:
-		return "redeemed"
-	case Expired:
-		return "expired"
-	default:
-		return "unknown"
-	}
-}
-
-func (s Type) String() string {
-	switch s {
-	case Fund:
-		return "fund"
-	case Redeem:
-		return "redeem"
-	case Payment:
-		return "payment"
-	default:
-		return "unknown"
-	}
-}
-
-func (s TransactionStatus) String() string {
-	switch s {
-	case Pending:
-		return "pending"
-	case Confirmed:
-		return "confirmed"
-	case Failed:
-		return "failed"
-	default:
-		return "unknown"
-	}
-}
-
-// ParseStatus converts database string to Status enum
-// Use this when reading from database or API
-func ParseCardStatus(s string) CardStatus {
-	switch s {
-	case "created":
-		return Created
-	case "funding":
-		return Funding
-	case "active":
-		return Active
-	case "redeemed":
-		return Redeemed
-	case "expired":
-		return Expired
-	default:
-		return Created // Default to Created if unknown
-	}
-}
-
-func ParseTransactionType(s string) Type {
-	switch s {
-	case "fund":
-		return Fund
-	case "redeem":
-		return Redeem
-	case "payment":
-		return Payment
-	default:
-		return Fund // Default to Fund if unknown
-	}
-}
-
-func ParseTransactionStatus(s string) TransactionStatus {
-	switch s {
-	case "pending":
-		return Pending
-	case "confirmed":
-		return Confirmed
-	case "failed":
-		return Failed
-	default:
-		return Pending // Default to Pending if unknown
-	}
-}
 
 type Card struct {
 	ID                 string     `json:"id" db:"id"`
@@ -154,7 +67,7 @@ func (c *Card) GetPurchasePrice() float64 {
 type Transaction struct {
 	ID               string            `json:"id" db:"id"`
 	CardID           string            `json:"card_id" db:"card_id"`
-	Type             Type              `json:"type" db:"type"`
+	Type             TransactionType   `json:"type" db:"type"`
 	RedemptionMethod *string           `json:"redemption_method,omitempty" db:"redemption_method"` // 'lightning' or 'onchain'
 	TxHash           *string           `json:"tx_hash,omitempty" db:"tx_hash"`                     // On-chain tx hash (NULL for Lightning)
 	PaymentHash      *string           `json:"payment_hash,omitempty" db:"payment_hash"`           // Lightning payment hash (NULL for on-chain)

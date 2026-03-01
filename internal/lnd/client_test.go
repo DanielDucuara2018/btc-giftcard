@@ -129,9 +129,9 @@ func TestNewClient_InvalidMacaroonPath(t *testing.T) {
 // --- Result type tests ---
 
 func TestPaymentResultStatus_Values(t *testing.T) {
-	assert.Equal(t, PaymentResultStatus(0), suceeded)
-	assert.Equal(t, PaymentResultStatus(1), failed)
-	assert.Equal(t, PaymentResultStatus(2), inflight)
+	assert.Equal(t, PaymentResultStatus("succeeded"), Succeeded)
+	assert.Equal(t, PaymentResultStatus("failed"), Failed)
+	assert.Equal(t, PaymentResultStatus("in_flight"), InFlight)
 }
 
 func TestPaymentResult_Fields(t *testing.T) {
@@ -139,13 +139,13 @@ func TestPaymentResult_Fields(t *testing.T) {
 		PaymentHash:     "abc123",
 		PaymentPreimage: "def456",
 		FeeSats:         10,
-		Status:          suceeded,
+		Status:          Succeeded,
 	}
 
 	assert.Equal(t, "abc123", result.PaymentHash)
 	assert.Equal(t, "def456", result.PaymentPreimage)
 	assert.Equal(t, int64(10), result.FeeSats)
-	assert.Equal(t, suceeded, result.Status)
+	assert.Equal(t, Succeeded, result.Status)
 }
 
 func TestInvoice_Fields(t *testing.T) {

@@ -3,6 +3,7 @@ package card
 import (
 	"btc-giftcard/internal/lnd"
 	messages "btc-giftcard/internal/queue"
+	"btc-giftcard/internal/wallet"
 	"btc-giftcard/pkg/cache"
 	streams "btc-giftcard/pkg/queue"
 
@@ -24,10 +25,12 @@ var (
 	ErrCardNotFound        = errors.New("card not found")
 	ErrCardNotActive       = errors.New("card is not active")
 	ErrCardAlreadyUsed     = errors.New("card has already been redeemed")
-	ErrInvalidAddress      = errors.New("invalid bitcoin address")
 	ErrInsufficientFunds   = errors.New("insufficient funds on card")
 	ErrInsufficientBalance = errors.New("insufficient treasury balance")
 	ErrTreasuryLockBusy    = errors.New("treasury lock is held by another process")
+	ErrInvalidMethod       = errors.New("invalid redeem method")
+	ErrInvalidAddress      = errors.New("invalid bitcoin address")
+	ErrLightningInvoice    = errors.New("lightning invoice is required")
 )
 
 // Treasury cache and lock constants
@@ -36,6 +39,18 @@ const (
 	treasuryAvailableCacheTTL = 10 * time.Second
 	treasuryLockKey           = "treasury:lock"
 	treasuryLockTTL           = 5 * time.Second
+)
+
+// On-chain redemption defaults
+const (
+	defaultTargetConf    int32 = 6     // ~1 hour confirmation target
+	minOnChainAmountSats int64 = 10000 // 10k sats minimum (dust protection)
+)
+
+// Card-level lock for concurrent redemption protection
+const (
+	cardLockPrefix = "card:lock:"
+	cardLockTTL    = 10 * time.Second
 )
 
 // Service handles gift card business logic.
@@ -251,13 +266,20 @@ func (s *Service) CreateCard(ctx context.Context, req CreateCardRequest) (*Creat
 	}, nil
 }
 
+type RedeemCardMethod string
+
+const (
+	OnChain   RedeemCardMethod = "onchain"
+	Lightning RedeemCardMethod = "lightning"
+)
+
 // RedeemCardRequest contains the parameters for redeeming (spending) a card
 type RedeemCardRequest struct {
-	Code               string // Card redemption code
-	Method             string // "lightning" or "onchain"
-	AmountSats         int64  // Amount to spend (can be partial)
-	DestinationAddress string // On-chain Bitcoin address (required if method=onchain)
-	LightningInvoice   string // BOLT11 invoice (required if method=lightning)
+	Code               string           // Card redemption code
+	Method             RedeemCardMethod // "lightning" or "onchain"
+	AmountSats         int64            // Amount to spend (can be partial)
+	DestinationAddress string           // On-chain Bitcoin address (required if method=onchain)
+	LightningInvoice   string           // BOLT11 invoice (required if method=lightning)
 }
 
 // RedeemCardResponse contains the redemption transaction details
@@ -274,133 +296,307 @@ type RedeemCardResponse struct {
 // RedeemCard processes a card spend (full or partial) via Lightning or on-chain.
 // Cards support partial spends — multiple transactions until balance = 0.
 func (s *Service) RedeemCard(ctx context.Context, req RedeemCardRequest) (*RedeemCardResponse, error) {
-	// ========================================================================
-	// STEP 1: Validate redemption method
-	// ========================================================================
-	// - req.Method must be "lightning" or "onchain"
-	// - If "lightning": req.LightningInvoice must be non-empty, req.DestinationAddress ignored
-	// - If "onchain": req.DestinationAddress must be non-empty, req.LightningInvoice ignored
-	// - Return ErrInvalidAddress or a new ErrInvalidMethod for invalid input
+	// Step 1: Validate input
+	if err := s.validateRedeemRequest(req); err != nil {
+		return nil, err
+	}
 
-	// ========================================================================
-	// STEP 2: Retrieve and validate card
-	// ========================================================================
-	// card, err := s.cardRepo.GetByCode(ctx, req.Code)
-	// - If ErrCardNotFound → return ErrCardNotFound
-	// - If card.Status != Active → return ErrCardNotActive
-	//   (Created = not yet funded, Redeemed = already fully spent, Expired = expired)
-	// - If req.AmountSats > card.BTCAmountSats → return ErrInsufficientFunds
-	// - If req.AmountSats <= 0 → return error "amount must be positive"
+	// Step 2: Acquire per-card lock (prevent concurrent double-spend)
+	lockKey := cardLockPrefix + req.Code
+	acquired, err := cache.SetNX(ctx, lockKey, "locked", cardLockTTL)
+	if err != nil {
+		return nil, fmt.Errorf("failed to acquire card lock: %w", err)
+	}
+	if !acquired {
+		return nil, errors.New("card is being processed by another request")
+	}
+	defer cache.Delete(ctx, lockKey)
 
-	// ========================================================================
-	// STEP 3: Execute payment via LND
-	// ========================================================================
-	//
-	// --- Lightning path (method == "lightning") ---
-	//
-	// 3a. Decode and validate the BOLT11 invoice:
-	//     decoded, err := s.lndClient.DecodeInvoice(ctx, req.LightningInvoice)
-	//     - If err != nil → return fmt.Errorf("invalid invoice: %w", err)
-	//     - If decoded.IsExpired → return error "invoice has expired"
-	//     - If decoded.AmountSats != req.AmountSats → return error
-	//       "invoice amount (%d sats) does not match requested amount (%d sats)"
-	//       This prevents the user from submitting a 1-sat invoice for a 100k-sat card
-	//     - If decoded.AmountSats == 0 → return error "zero-amount invoices not supported"
-	//
-	// 3b. Pay the invoice:
-	//     result, err := s.lndClient.PayInvoice(ctx, req.LightningInvoice, cfg.MaxPaymentFeeSats)
-	//     - If err != nil → return fmt.Errorf("lightning payment failed: %w", err)
-	//     - result.PaymentHash and result.PaymentPreimage are the proof of payment
-	//     - result.FeeSats is the routing fee (absorbed by us, not deducted from card)
-	//
-	// 3c. Set transaction fields:
-	//     paymentHash = &result.PaymentHash
-	//     paymentPreimage = &result.PaymentPreimage
-	//     method = "lightning"
-	//     txHash = nil  (no on-chain tx)
-	//
-	// --- On-chain path (method == "onchain") ---
-	//
-	// 3d. Validate destination address:
-	//     - Use wallet.ValidateAddress(req.DestinationAddress, s.network)
-	//       or let LND validate it (SendCoins will reject invalid addresses)
-	//     - Consider minimum on-chain amount (e.g., 10,000 sats) due to
-	//       mining fees making tiny on-chain sends uneconomical
-	//
-	// 3e. Send on-chain:
-	//     result, err := s.lndClient.SendOnChain(ctx, req.DestinationAddress, req.AmountSats)
-	//     - If err != nil → return fmt.Errorf("on-chain send failed: %w", err)
-	//     - Note: the mining fee is paid by us FROM LND's wallet, not from amountSats
-	//       The user receives exactly req.AmountSats
-	//
-	// 3f. Set transaction fields:
-	//     txHash = &result.TxHash
-	//     method = "onchain"
-	//     paymentHash = nil  (no Lightning payment)
-	//     toAddress = &req.DestinationAddress
+	// Step 3: Retrieve and validate card
+	card, err := s.validateCardForRedemption(ctx, req.Code, req.AmountSats)
+	if err != nil {
+		return nil, err
+	}
 
-	// ========================================================================
-	// STEP 4: Create Transaction record in database
-	// ========================================================================
-	// now := time.Now().UTC()
-	// tx := &database.Transaction{
-	//     ID:               uuid.New().String(),
-	//     CardID:           card.ID,
-	//     Type:             database.Redeem,
-	//     RedemptionMethod: &method,          // "lightning" or "onchain"
-	//     TxHash:           txHash,           // On-chain only (nil for Lightning)
-	//     PaymentHash:      paymentHash,      // Lightning only (nil for on-chain)
-	//     PaymentPreimage:  paymentPreimage,  // Lightning only — PROOF OF PAYMENT
-	//     LightningInvoice: lightningInvoice, // Lightning only — the BOLT11 string
-	//     ToAddress:        toAddress,        // On-chain only — destination address
-	//     BTCAmountSats:    req.AmountSats,
-	//     Status:           database.Confirmed,  // Lightning is instant; on-chain pending
-	//     Confirmations:    0,
-	//     CreatedAt:        now,
-	//     BroadcastAt:      &now,             // On-chain: broadcast time; Lightning: payment time
-	//     ConfirmedAt:      confirmedAt,      // Lightning: &now; On-chain: nil (set later by monitor)
-	// }
-	// err = s.txRepo.Create(ctx, tx)
-	//
-	// NOTE on status:
-	//   - Lightning: Status=Confirmed immediately (preimage = proof of settlement)
-	//   - On-chain: Status=Pending until confirmations ≥ 1
-	//     → Publish MonitorTransactionMessage to track confirmations
-	//     → A monitor_tx worker updates status when confirmed
+	// Step 4: Execute payment via LND
+	payResult, err := s.executePayment(ctx, req)
+	if err != nil {
+		return nil, err
+	}
 
-	// ========================================================================
-	// STEP 5: Update card balance
-	// ========================================================================
-	// remainingBalance := card.BTCAmountSats - req.AmountSats
-	//
-	// if remainingBalance == 0:
-	//     // Fully redeemed — mark card as Redeemed
-	//     redeemedAt := time.Now().UTC()
-	//     s.cardRepo.Update(ctx, card.ID, database.Redeemed, &remainingBalance, nil, &redeemedAt)
-	// else:
-	//     // Partial spend — card stays Active with reduced balance
-	//     s.cardRepo.Update(ctx, card.ID, database.Active, &remainingBalance, nil, nil)
-	//
-	// NOTE: remainingBalance is ALWAYS ≥ 0 due to the check in Step 2
-	// TODO: Consider wrapping Steps 3-5 in a database transaction for atomicity
-	//   If the LND payment succeeds but DB update fails, we've paid but not recorded it.
-	//   Mitigation: record the Transaction BEFORE paying, with Status=Pending,
-	//   then update to Confirmed after LND returns success.
+	// Step 5: Create transaction record
+	now := time.Now().UTC()
+	tx, err := s.recordRedemptionTransaction(ctx, card.ID, req, payResult, now)
+	if err != nil {
+		return nil, err
+	}
 
-	// ========================================================================
-	// STEP 6: Return response
-	// ========================================================================
-	// return &RedeemCardResponse{
-	//     TransactionID:    tx.ID,
-	//     Method:           method,
-	//     TxHash:           txHash,
-	//     PaymentHash:      paymentHash,
-	//     BTCAmountSats:    req.AmountSats,
-	//     RemainingBalance: remainingBalance,
-	//     Status:           tx.Status,
-	// }, nil
+	// Step 6: Update card balance
+	remainingBalance, err := s.updateCardBalance(ctx, card.ID, card.BTCAmountSats, req.AmountSats)
+	if err != nil {
+		return nil, err
+	}
 
-	return nil, errors.New("not implemented")
+	// Step 7: Invalidate treasury cache (balance changed)
+	s.InvalidateTreasuryCache(ctx)
+
+	// Step 8: Publish monitor message for on-chain transactions
+	if req.Method == OnChain && payResult.TxHash != nil {
+		s.publishMonitorTransaction(ctx, card.ID, tx.ID, *payResult.TxHash, req.AmountSats, req.DestinationAddress)
+	}
+
+	logger.Info("Card redeemed successfully",
+		zap.String("card_id", card.ID),
+		zap.String("tx_id", tx.ID),
+		zap.String("method", string(req.Method)),
+		zap.Int64("amount_sats", req.AmountSats),
+		zap.Int64("remaining_sats", remainingBalance),
+	)
+
+	return &RedeemCardResponse{
+		TransactionID:    tx.ID,
+		Method:           string(req.Method),
+		TxHash:           payResult.TxHash,
+		PaymentHash:      payResult.PaymentHash,
+		BTCAmountSats:    req.AmountSats,
+		RemainingBalance: remainingBalance,
+		Status:           tx.Status,
+	}, nil
+}
+
+// ============================================================================
+// RedeemCard helpers — each method has a single concern
+// ============================================================================
+
+// validateRedeemRequest validates the redemption request fields.
+func (s *Service) validateRedeemRequest(req RedeemCardRequest) error {
+	switch req.Method {
+	case Lightning:
+		if req.LightningInvoice == "" {
+			return ErrLightningInvoice
+		}
+	case OnChain:
+		if req.DestinationAddress == "" {
+			return ErrInvalidAddress
+		}
+	default:
+		return ErrInvalidMethod
+	}
+
+	if req.AmountSats <= 0 {
+		return errors.New("amount must be positive")
+	}
+
+	return nil
+}
+
+// validateCardForRedemption retrieves a card and checks it can be redeemed.
+func (s *Service) validateCardForRedemption(ctx context.Context, code string, amountSats int64) (*database.Card, error) {
+	card, err := s.GetCardByCode(ctx, code)
+	if err != nil {
+		return nil, err
+	}
+
+	if card.Status != database.Active {
+		return nil, ErrCardNotActive
+	}
+
+	if amountSats > card.BTCAmountSats {
+		return nil, ErrInsufficientFunds
+	}
+
+	return card, nil
+}
+
+// paymentOutput holds the results of executePayment (unified for both paths).
+type paymentOutput struct {
+	PaymentHash     *string
+	PaymentPreimage *string
+	TxHash          *string
+	ToAddress       *string
+	Invoice         *string
+	Status          database.TransactionStatus
+	ConfirmedAt     *time.Time
+}
+
+// executePayment dispatches to the correct payment path (Lightning or on-chain).
+func (s *Service) executePayment(ctx context.Context, req RedeemCardRequest) (*paymentOutput, error) {
+	switch req.Method {
+	case Lightning:
+		return s.executeLightningPayment(ctx, req.LightningInvoice, req.AmountSats)
+	case OnChain:
+		return s.executeOnChainPayment(ctx, req.DestinationAddress, req.AmountSats)
+	default:
+		return nil, ErrInvalidMethod
+	}
+}
+
+// executeLightningPayment decodes, validates, and pays a BOLT11 invoice.
+func (s *Service) executeLightningPayment(ctx context.Context, invoice string, amountSats int64) (*paymentOutput, error) {
+	// Decode and validate
+	decoded, err := s.lndClient.DecodeInvoice(ctx, invoice)
+	if err != nil {
+		return nil, fmt.Errorf("invalid invoice: %w", err)
+	}
+
+	if decoded.AmountSats == 0 {
+		return nil, errors.New("zero-amount invoices not supported")
+	}
+
+	if decoded.IsExpired {
+		return nil, errors.New("invoice has expired")
+	}
+
+	if decoded.AmountSats != amountSats {
+		return nil, fmt.Errorf("invoice amount (%d sats) does not match requested amount (%d sats)", decoded.AmountSats, amountSats)
+	}
+
+	// Pay the invoice
+	logger.Info("Paying Lightning invoice",
+		zap.Int64("amount_sats", amountSats),
+		zap.String("destination", decoded.Destination),
+	)
+
+	result, err := s.lndClient.PayInvoice(ctx, invoice, s.lndClient.Cfg.MaxPaymentFeeSats)
+	if err != nil {
+		return nil, fmt.Errorf("lightning payment failed: %w", err)
+	}
+
+	// Verify payment actually succeeded (PayInvoice could return non-error with failed status)
+	if result.Status != lnd.Succeeded {
+		return nil, fmt.Errorf("lightning payment did not succeed: status=%s", result.Status)
+	}
+
+	now := time.Now().UTC()
+	return &paymentOutput{
+		PaymentHash:     &result.PaymentHash,
+		PaymentPreimage: &result.PaymentPreimage,
+		Invoice:         &invoice,
+		Status:          database.Confirmed, // Lightning settles instantly
+		ConfirmedAt:     &now,
+	}, nil
+}
+
+// executeOnChainPayment validates the address and sends an on-chain transaction.
+func (s *Service) executeOnChainPayment(ctx context.Context, address string, amountSats int64) (*paymentOutput, error) {
+	// Validate destination address
+	isValid, err := wallet.ValidateAddress(address, s.network)
+	if err != nil {
+		return nil, fmt.Errorf("failed to validate address: %w", err)
+	}
+	if !isValid {
+		return nil, ErrInvalidAddress
+	}
+
+	// Enforce minimum on-chain amount (mining fees make tiny sends uneconomical)
+	if amountSats < minOnChainAmountSats {
+		return nil, fmt.Errorf("on-chain minimum is %d sats", minOnChainAmountSats)
+	}
+
+	// Send on-chain
+	logger.Info("Sending on-chain transaction",
+		zap.Int64("amount_sats", amountSats),
+		zap.String("destination", address),
+		zap.Int32("target_conf", defaultTargetConf),
+	)
+
+	result, err := s.lndClient.SendOnChain(ctx, address, amountSats, defaultTargetConf)
+	if err != nil {
+		return nil, fmt.Errorf("on-chain send failed: %w", err)
+	}
+
+	return &paymentOutput{
+		TxHash:    &result.TxHash,
+		ToAddress: &address,
+		Status:    database.Pending, // Confirmed later by monitor worker
+	}, nil
+}
+
+// recordRedemptionTransaction creates a Transaction record for the redemption.
+func (s *Service) recordRedemptionTransaction(
+	ctx context.Context,
+	cardID string,
+	req RedeemCardRequest,
+	pay *paymentOutput,
+	now time.Time,
+) (*database.Transaction, error) {
+	method := string(req.Method)
+	tx := &database.Transaction{
+		ID:               uuid.New().String(),
+		CardID:           cardID,
+		Type:             database.Redeem,
+		RedemptionMethod: &method,
+		TxHash:           pay.TxHash,
+		PaymentHash:      pay.PaymentHash,
+		PaymentPreimage:  pay.PaymentPreimage,
+		LightningInvoice: pay.Invoice,
+		ToAddress:        pay.ToAddress,
+		BTCAmountSats:    req.AmountSats,
+		Status:           pay.Status,
+		Confirmations:    0,
+		CreatedAt:        now,
+		BroadcastAt:      &now,
+		ConfirmedAt:      pay.ConfirmedAt,
+	}
+
+	if err := s.txRepo.Create(ctx, tx); err != nil {
+		return nil, fmt.Errorf("failed to create transaction: %w", err)
+	}
+
+	return tx, nil
+}
+
+// updateCardBalance deducts the spend amount and marks the card redeemed if balance is zero.
+func (s *Service) updateCardBalance(ctx context.Context, cardID string, currentBalance, spendAmount int64) (int64, error) {
+	remaining := currentBalance - spendAmount
+	status := database.Active
+	var redeemedAt *time.Time
+
+	if remaining == 0 {
+		status = database.Redeemed
+		t := time.Now().UTC()
+		redeemedAt = &t
+	}
+
+	if err := s.cardRepo.Update(ctx, cardID, status, &remaining, nil, redeemedAt); err != nil {
+		return 0, fmt.Errorf("failed to update card: %w", err)
+	}
+
+	return remaining, nil
+}
+
+// publishMonitorTransaction publishes a MonitorTransactionMessage so a worker
+// can track on-chain confirmations and update the transaction status.
+func (s *Service) publishMonitorTransaction(ctx context.Context, cardID, txID, txHash string, amountSats int64, destAddr string) {
+	msg := messages.MonitorTransactionMessage{
+		CardID:             cardID,
+		TxHash:             txHash,
+		ExpectedAmountSats: amountSats,
+		DestinationAddr:    destAddr,
+	}
+
+	msgJSON, err := msg.ToJSON()
+	if err != nil {
+		logger.Error("Failed to serialize MonitorTransactionMessage",
+			zap.String("card_id", cardID),
+			zap.String("tx_id", txID),
+			zap.Error(err),
+		)
+		return
+	}
+
+	if _, err := s.queue.Publish(ctx, "monitor_tx", msgJSON); err != nil {
+		logger.Error("Failed to publish MonitorTransactionMessage",
+			zap.String("card_id", cardID),
+			zap.String("tx_hash", txHash),
+			zap.Error(err),
+		)
+	} else {
+		logger.Info("Published MonitorTransactionMessage",
+			zap.String("card_id", cardID),
+			zap.String("tx_hash", txHash),
+		)
+	}
 }
 
 // GetCardByCode retrieves card details by redemption code.

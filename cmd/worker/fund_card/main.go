@@ -240,7 +240,7 @@ func (h *messageHandler) processMessage(ctx context.Context, messageID string, d
 		return fmt.Errorf("error fetching card: %w", err)
 	}
 	if card.Status != database.Created {
-		logger.Warn("Card already processed, skipping", zap.String("card_id", card.ID), zap.String("status", card.Status.String()))
+		logger.Warn("Card already processed, skipping", zap.String("card_id", card.ID), zap.String("status", string(card.Status)))
 		return nil // Idempotent: skip already-funded cards
 	}
 

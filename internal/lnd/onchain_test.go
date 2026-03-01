@@ -38,7 +38,7 @@ func (m *mockOnchainLNClient) WalletBalance(ctx context.Context, in *lnrpc.Walle
 func newOnchainTestClient(mock *mockOnchainLNClient) *Client {
 	return &Client{
 		lnClient: mock,
-		cfg:      Config{},
+		Cfg:      Config{},
 	}
 }
 

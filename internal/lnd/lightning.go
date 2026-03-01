@@ -29,11 +29,11 @@ func (c *Client) PayInvoice(ctx context.Context, bolt11 string, maxFeeSats int64
 
 	req := &routerrpc.SendPaymentRequest{
 		PaymentRequest: bolt11,
-		TimeoutSeconds: int32(c.cfg.PaymentTimeoutSeconds),
+		TimeoutSeconds: int32(c.Cfg.PaymentTimeoutSeconds),
 		FeeLimitSat:    maxFeeSats,
 	}
 
-	payCtx, cancel := context.WithTimeout(ctx, time.Duration(c.cfg.PaymentTimeoutSeconds)*time.Second)
+	payCtx, cancel := context.WithTimeout(ctx, time.Duration(c.Cfg.PaymentTimeoutSeconds)*time.Second)
 	defer cancel()
 
 	stream, err := c.routerClient.SendPaymentV2(payCtx, req)
@@ -54,13 +54,13 @@ func (c *Client) PayInvoice(ctx context.Context, bolt11 string, maxFeeSats int64
 				PaymentHash:     payment.PaymentHash,
 				PaymentPreimage: payment.PaymentPreimage,
 				FeeSats:         payment.FeeSat,
-				Status:          suceeded,
+				Status:          Succeeded,
 			}, nil
 
 		case lnrpc.Payment_FAILED:
 			return &PaymentResult{
 				PaymentHash: payment.PaymentHash,
-				Status:      failed,
+				Status:      Failed,
 			}, fmt.Errorf("payment failed: %s", payment.FailureReason)
 
 		case lnrpc.Payment_IN_FLIGHT, lnrpc.Payment_INITIATED:

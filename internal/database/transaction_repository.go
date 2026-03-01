@@ -55,7 +55,7 @@ func (r *TransactionRepository) Create(ctx context.Context, tx *Transaction) err
 		query,
 		tx.ID,
 		tx.CardID,
-		tx.Type.String(),
+		tx.Type,
 		tx.RedemptionMethod,
 		tx.TxHash,
 		tx.PaymentHash,
@@ -64,7 +64,7 @@ func (r *TransactionRepository) Create(ctx context.Context, tx *Transaction) err
 		tx.FromAddress,
 		tx.ToAddress,
 		tx.BTCAmountSats,
-		tx.Status.String(),
+		tx.Status,
 		tx.Confirmations,
 		tx.CreatedAt,
 		tx.BroadcastAt,
@@ -89,13 +89,11 @@ func (r *TransactionRepository) GetByID(ctx context.Context, id string) (*Transa
     FROM transactions WHERE id = $1`
 
 	var transaction Transaction
-	var typeStr string
-	var statusStr string
 
 	err := r.db.QueryRow(ctx, query, id).Scan(
 		&transaction.ID,
 		&transaction.CardID,
-		&typeStr,
+		&transaction.Type,
 		&transaction.RedemptionMethod,
 		&transaction.TxHash,
 		&transaction.PaymentHash,
@@ -104,7 +102,7 @@ func (r *TransactionRepository) GetByID(ctx context.Context, id string) (*Transa
 		&transaction.FromAddress,
 		&transaction.ToAddress,
 		&transaction.BTCAmountSats,
-		&statusStr,
+		&transaction.Status,
 		&transaction.Confirmations,
 		&transaction.CreatedAt,
 		&transaction.BroadcastAt,
@@ -118,8 +116,6 @@ func (r *TransactionRepository) GetByID(ctx context.Context, id string) (*Transa
 		return nil, fmt.Errorf("failed to get transaction with id %s: %w", id, err)
 	}
 
-	transaction.Type = ParseTransactionType(typeStr)
-	transaction.Status = ParseTransactionStatus(statusStr)
 	return &transaction, nil
 }
 
@@ -134,13 +130,11 @@ func (r *TransactionRepository) GetByTxHash(ctx context.Context, txHash string) 
     FROM transactions WHERE tx_hash = $1`
 
 	var transaction Transaction
-	var typeStr string
-	var statusStr string
 
 	err := r.db.QueryRow(ctx, query, txHash).Scan(
 		&transaction.ID,
 		&transaction.CardID,
-		&typeStr,
+		&transaction.Type,
 		&transaction.RedemptionMethod,
 		&transaction.TxHash,
 		&transaction.PaymentHash,
@@ -149,7 +143,7 @@ func (r *TransactionRepository) GetByTxHash(ctx context.Context, txHash string) 
 		&transaction.FromAddress,
 		&transaction.ToAddress,
 		&transaction.BTCAmountSats,
-		&statusStr,
+		&transaction.Status,
 		&transaction.Confirmations,
 		&transaction.CreatedAt,
 		&transaction.BroadcastAt,
@@ -163,8 +157,6 @@ func (r *TransactionRepository) GetByTxHash(ctx context.Context, txHash string) 
 		return nil, fmt.Errorf("failed to get transaction with tx hash %s: %w", txHash, err)
 	}
 
-	transaction.Type = ParseTransactionType(typeStr)
-	transaction.Status = ParseTransactionStatus(statusStr)
 	return &transaction, nil
 }
 
@@ -187,13 +179,11 @@ func (r *TransactionRepository) ListByCardID(ctx context.Context, cardID string)
 	var transactions []*Transaction
 	for rows.Next() {
 		var transaction Transaction
-		var typeStr string
-		var statusStr string
 
 		err := rows.Scan(
 			&transaction.ID,
 			&transaction.CardID,
-			&typeStr,
+			&transaction.Type,
 			&transaction.RedemptionMethod,
 			&transaction.TxHash,
 			&transaction.PaymentHash,
@@ -202,7 +192,7 @@ func (r *TransactionRepository) ListByCardID(ctx context.Context, cardID string)
 			&transaction.FromAddress,
 			&transaction.ToAddress,
 			&transaction.BTCAmountSats,
-			&statusStr,
+			&transaction.Status,
 			&transaction.Confirmations,
 			&transaction.CreatedAt,
 			&transaction.BroadcastAt,
@@ -212,8 +202,6 @@ func (r *TransactionRepository) ListByCardID(ctx context.Context, cardID string)
 			return nil, fmt.Errorf("failed to scan transaction row: %w", err)
 		}
 
-		transaction.Type = ParseTransactionType(typeStr)
-		transaction.Status = ParseTransactionStatus(statusStr)
 		transactions = append(transactions, &transaction)
 	}
 
@@ -236,7 +224,7 @@ func (r *TransactionRepository) Update(ctx context.Context, id string, status Tr
 			confirmed_at = COALESCE($5, confirmed_at)
 		WHERE id = $1`
 
-	commandTag, err := r.db.Exec(ctx, query, id, status.String(), confirmations, broadcastAt, confirmedAt)
+	commandTag, err := r.db.Exec(ctx, query, id, status, confirmations, broadcastAt, confirmedAt)
 	if err != nil {
 		return fmt.Errorf("failed to update transaction with id %s: %w", id, err)
 	}

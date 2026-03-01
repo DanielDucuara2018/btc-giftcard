@@ -70,7 +70,7 @@ func newTestClient(ln lnrpc.LightningClient, router routerrpc.RouterClient) *Cli
 	return &Client{
 		lnClient:     ln,
 		routerClient: router,
-		cfg: Config{
+		Cfg: Config{
 			PaymentTimeoutSeconds: 5,
 			MaxPaymentFeeSats:     100,
 		},
@@ -206,7 +206,7 @@ func TestPayInvoice_Succeeded(t *testing.T) {
 	assert.Equal(t, "hash1", result.PaymentHash)
 	assert.Equal(t, "preimage1", result.PaymentPreimage)
 	assert.Equal(t, int64(5), result.FeeSats)
-	assert.Equal(t, suceeded, result.Status)
+	assert.Equal(t, Succeeded, result.Status)
 }
 
 func TestPayInvoice_Failed(t *testing.T) {
@@ -240,7 +240,7 @@ func TestPayInvoice_Failed(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "payment failed")
 	assert.NotNil(t, result)
-	assert.Equal(t, failed, result.Status)
+	assert.Equal(t, Failed, result.Status)
 	assert.Equal(t, "hash1", result.PaymentHash)
 }
 
@@ -383,7 +383,7 @@ func TestPayInvoice_InFlightThenSucceeded(t *testing.T) {
 
 	result, err := client.PayInvoice(context.Background(), "lntb10u1...", 50)
 	require.NoError(t, err)
-	assert.Equal(t, suceeded, result.Status)
+	assert.Equal(t, Succeeded, result.Status)
 	assert.Equal(t, "pre1", result.PaymentPreimage)
 	assert.Equal(t, int64(2), result.FeeSats)
 }
@@ -413,7 +413,7 @@ func TestPayInvoice_RequestFieldsPassedCorrectly(t *testing.T) {
 	}
 
 	client := newTestClient(mockLN, mockRouter)
-	client.cfg.PaymentTimeoutSeconds = 45
+	client.Cfg.PaymentTimeoutSeconds = 45
 
 	_, err := client.PayInvoice(context.Background(), "lntb100u1bolt11here", 250)
 	require.NoError(t, err)

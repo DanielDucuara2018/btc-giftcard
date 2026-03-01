@@ -62,7 +62,7 @@ func (r *CardRepository) Create(ctx context.Context, card *Card) error {
 		card.FiatAmountCents,
 		card.FiatCurrency,
 		card.PurchasePriceCents,
-		card.Status.String(),
+		card.Status,
 		card.CreatedAt,
 		card.FundedAt,
 		card.RedeemedAt,
@@ -94,7 +94,6 @@ func (r *CardRepository) GetByCode(ctx context.Context, code string) (*Card, err
     FROM cards WHERE code = $1`
 
 	var card Card
-	var statusStr string
 
 	err := r.db.QueryRow(ctx, query, code).Scan(
 		&card.ID,
@@ -106,7 +105,7 @@ func (r *CardRepository) GetByCode(ctx context.Context, code string) (*Card, err
 		&card.FiatAmountCents,
 		&card.FiatCurrency,
 		&card.PurchasePriceCents,
-		&statusStr,
+		&card.Status,
 		&card.CreatedAt,
 		&card.FundedAt,
 		&card.RedeemedAt,
@@ -119,7 +118,6 @@ func (r *CardRepository) GetByCode(ctx context.Context, code string) (*Card, err
 		return nil, fmt.Errorf("failed to get card with code %s: %w", code, err)
 	}
 
-	card.Status = ParseCardStatus(statusStr)
 	return &card, nil
 }
 
@@ -133,7 +131,6 @@ func (r *CardRepository) GetByID(ctx context.Context, id string) (*Card, error) 
     FROM cards WHERE id = $1`
 
 	var card Card
-	var statusStr string
 
 	err := r.db.QueryRow(ctx, query, id).Scan(
 		&card.ID,
@@ -145,7 +142,7 @@ func (r *CardRepository) GetByID(ctx context.Context, id string) (*Card, error) 
 		&card.FiatAmountCents,
 		&card.FiatCurrency,
 		&card.PurchasePriceCents,
-		&statusStr,
+		&card.Status,
 		&card.CreatedAt,
 		&card.FundedAt,
 		&card.RedeemedAt,
@@ -158,7 +155,6 @@ func (r *CardRepository) GetByID(ctx context.Context, id string) (*Card, error) 
 		return nil, fmt.Errorf("failed to get card with id %s: %w", id, err)
 	}
 
-	card.Status = ParseCardStatus(statusStr)
 	return &card, nil
 }
 
@@ -173,7 +169,7 @@ func (r *CardRepository) Update(ctx context.Context, id string, status CardStatu
 			redeemed_at = COALESCE($5, redeemed_at)
 		WHERE id = $1`
 
-	commandTag, err := r.db.Exec(ctx, query, id, status.String(), BTCAmountSats, fundedAt, redeemedAt)
+	commandTag, err := r.db.Exec(ctx, query, id, status, BTCAmountSats, fundedAt, redeemedAt)
 	if err != nil {
 		return fmt.Errorf("failed to update card with id %s: %w", id, err)
 	}
@@ -203,7 +199,6 @@ func (r *CardRepository) ListByUserID(ctx context.Context, userID string) ([]*Ca
 	var cards []*Card
 	for rows.Next() {
 		var card Card
-		var statusStr string
 
 		err := rows.Scan(
 			&card.ID,
@@ -215,7 +210,7 @@ func (r *CardRepository) ListByUserID(ctx context.Context, userID string) ([]*Ca
 			&card.FiatAmountCents,
 			&card.FiatCurrency,
 			&card.PurchasePriceCents,
-			&statusStr,
+			&card.Status,
 			&card.CreatedAt,
 			&card.FundedAt,
 			&card.RedeemedAt,
@@ -224,7 +219,6 @@ func (r *CardRepository) ListByUserID(ctx context.Context, userID string) ([]*Ca
 			return nil, fmt.Errorf("failed to scan card row: %w", err)
 		}
 
-		card.Status = ParseCardStatus(statusStr)
 		cards = append(cards, &card)
 	}
 

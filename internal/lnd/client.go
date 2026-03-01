@@ -139,22 +139,20 @@ type LightningClient interface {
 // ============================================================================
 // Result types — returned by LightningClient methods
 // ============================================================================
-//
-// IMPLEMENT:
 
-type PaymentResultStatus int
+type PaymentResultStatus string
 
 const (
-	suceeded PaymentResultStatus = iota
-	failed
-	inflight
+	Succeeded PaymentResultStatus = "succeeded"
+	Failed    PaymentResultStatus = "failed"
+	InFlight  PaymentResultStatus = "in_flight"
 )
 
 type PaymentResult struct {
 	PaymentHash     string              // hex-encoded payment hash (32 bytes)
 	PaymentPreimage string              // hex-encoded preimage (proof of payment)
 	FeeSats         int64               // Routing fee paid in satoshis
-	Status          PaymentResultStatus // "SUCCEEDED", "FAILED", "IN_FLIGHT"
+	Status          PaymentResultStatus // "succeeded", "failed", "in_flight"
 }
 
 type Invoice struct {
@@ -218,7 +216,7 @@ type Client struct {
 	conn         *grpc.ClientConn       // gRPC connection (reused for all calls)
 	lnClient     lnrpc.LightningClient  // Auto-generated gRPC stub
 	routerClient routerrpc.RouterClient // Router sub-server client (SendPaymentV2)
-	cfg          Config                 // Connection & behavior config
+	Cfg          Config                 // Connection & behavior config (exported for service access)
 }
 
 func NewClient(cfg Config) (*Client, error) {
@@ -263,7 +261,7 @@ func NewClient(cfg Config) (*Client, error) {
 		conn:         conn,
 		lnClient:     lnClient,
 		routerClient: routerrpc.NewRouterClient(conn),
-		cfg:          cfg,
+		Cfg:          cfg,
 	}, nil
 }
 
