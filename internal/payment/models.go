@@ -1,6 +1,14 @@
 package payment
 
-import "time"
+import (
+	"errors"
+	"time"
+)
+
+// ErrInvalidWebhookSignature is returned by ConstructEvent when the
+// Stripe-Signature header does not match the configured webhook secret.
+// The HTTP handler maps this to 400 so Stripe stops retrying the delivery.
+var ErrInvalidWebhookSignature = errors.New("invalid webhook signature")
 
 // Event type constants — provider-agnostic names for webhook event types.
 const (

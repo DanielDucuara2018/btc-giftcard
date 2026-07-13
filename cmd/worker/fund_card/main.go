@@ -33,6 +33,7 @@ import (
 	"btc-giftcard/config"
 	"btc-giftcard/internal/card"
 	"btc-giftcard/internal/database"
+	"btc-giftcard/internal/email"
 	"btc-giftcard/internal/exchange"
 	"btc-giftcard/internal/lnd"
 	messages "btc-giftcard/internal/queue"
@@ -98,7 +99,15 @@ func run() error {
 	cardRepo := database.NewCardRepository(db)
 	txRepo := database.NewTransactionRepository(db)
 	queue := streams.NewStreamQueue(cache.Client)
-	cardService := card.NewService(db, cardRepo, txRepo, queue, lndClient, nil, nil)
+	var emailCfg email.Config
+	if err := copier.Copy(&emailCfg, &Cfg.Email); err != nil {
+		return fmt.Errorf("failed to copy fees config: %w", err)
+	}
+	mailer, err := email.New(emailCfg)
+	if err != nil {
+		return fmt.Errorf("failed to initialise email provider: %w", err)
+	}
+	cardService := card.NewService(db, cardRepo, txRepo, queue, lndClient, nil, nil, mailer)
 	handler := newMessageHandler(cardService, provider)
 
 	if err := startConsumer(ctx, queue, handler); err != nil {

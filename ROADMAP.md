@@ -1783,7 +1783,122 @@ zero maintenance, instant value for users.
 
 ---
 
-## Notes
+## Phase 7 — Email Notifications
+
+**Goal:** Deliver transactional emails at every meaningful payment and card lifecycle event, reducing support burden and giving buyers a reliable fallback if the browser session is lost.
+
+### 7.1 Transactional Email Integration
+
+**Why it matters:**
+
+- The SuccessPage currently tells timed-out users to "check your email for card codes" — but no email is sent yet. This is a broken promise in the current UX.
+- If a webhook is delayed or the browser tab is closed before polling completes, the buyer has no out-of-band delivery path.
+- Redemption and payment failure events are fully silent to the user today.
+
+**Provider choice:** Any SMTP-compatible transactional provider works (Resend, Postmark, SendGrid, AWS SES). Resend is recommended for simplicity — single API call, generous free tier, strong deliverability.
+
+**New config section (`config.toml`):**
+
+```toml
+[email]
+provider     = "resend"          # resend | smtp | disabled
+api_key      = ""                # Resend API key (or SMTP password)
+from_address = "cards@yourdomain.com"
+from_name    = "BTC Gift Cards"
+smtp_host    = ""                # only for provider=smtp
+smtp_port    = "587"
+```
+
+**New internal package:** `internal/email/`
+
+```
+internal/email/
+├── provider.go      # Provider interface: Send(ctx, msg Message) error
+├── resend.go        # Resend HTTP API client
+├── smtp.go          # Standard SMTP fallback
+├── noop.go          # No-op (for tests and disabled mode)
+└── templates/
+    ├── purchase_confirmation.html
+    ├── card_codes.html
+    ├── payment_failed.html
+    ├── redemption_confirmation.html
+    └── payment_expired.html
+```
+
+**`Message` type:**
+
+```go
+type Message struct {
+    To      string
+    Subject string
+    HTML    string
+    Text    string // plain-text fallback
+}
+```
+
+### 7.2 Email Trigger Points
+
+| Trigger | When | To | Content |
+|---|---|---|---|
+| Purchase confirmation | Immediately after `POST /api/cards` succeeds | `purchase_email` | Order summary, session ID, payment link |
+| Card codes delivery | When `HandleCheckoutEvent` sets `payment_status = paid` | `purchase_email` | Card code(s), face value, redemption instructions |
+| Payment failed | When `checkout.session.expired` fires | `purchase_email` | Expiry notice, support link |
+| Card activation | When `FundCard` sets `status = active` | `purchase_email` | BTC balance, current exchange rate used |
+| Redemption confirmation | After successful `RedeemCard` | `owner_email` | Amount sent, payment hash, remaining balance |
+| Low balance warning | When `RedeemCard` leaves balance < 10% | `owner_email` | Remaining balance, redemption link |
+
+### 7.3 Architectural Points
+
+**Where email sending lives:**
+
+Email is a side-effect of business events, not part of the core transaction. Send emails **after** the DB write commits, never inside a DB transaction:
+
+- `CreateCard` → send purchase confirmation after `cardRepo.BulkCreate` succeeds.
+- `HandleCheckoutEvent` → send card codes after `UpdatePaymentStatus` succeeds.
+- `FundCard` → send activation notice after the DB transaction commits.
+- `RedeemCard` → send redemption confirmation after the DB update commits.
+
+Use fire-and-forget with structured error logging — an email failure must never roll back a payment or redemption:
+
+```go
+go func() {
+    if err := s.emailProvider.Send(ctx, msg); err != nil {
+        logger.Error("failed to send email", zap.String("to", msg.To), zap.Error(err))
+    }
+}()
+```
+
+**Idempotency:** The `HandleCheckoutEvent` handler already has an idempotency guard (`payment_status != pending` → no-op). Emails sent inside that guard will not be re-sent on Stripe retries.
+
+**Template rendering:** Use Go's `html/template` package. Templates live in `internal/email/templates/`. Inject card data at render time — no dynamic data stored in the provider.
+
+**Unsubscribe / compliance:** For transactional emails (receipts, card codes), CAN-SPAM / GDPR require a physical address in the footer and an opt-out path. Keep a `email_preferences` table or a simple `unsubscribed` flag on the user record for future use.
+
+**Testing:**
+
+- Use the `noop.go` provider in unit tests — no real emails sent.
+- Use [Mailtrap](https://mailtrap.io) or a local SMTP server (Mailhog via Docker) for integration tests and local dev.
+- Add `GIFTER_EMAIL_PROVIDER=disabled` to `.env.example` so new contributors don't accidentally send real emails.
+
+### 7.4 Implementation Tasks
+
+- [x] **7.0** Add `[email]` section to `config.toml` and `config/api.go`
+- [x] **7.0** Create `internal/email/provider.go` with `Provider` interface and `Message` type
+- [ ] **7.0** Implement `resend.go` client (single `POST https://api.resend.com/emails`) — skipped: SMTP covers both Mailpit and AWS SES SMTP; no HTTP SDK needed
+- [x] **7.0** Implement `noop.go` for tests
+- [x] **7.0** Add `internal/email/smtp.go` using `net/smtp` (covers Mailpit locally + AWS SES SMTP in prod)
+- [x] **7.0** Wire email provider into `cmd/api/main.go` and inject into `card.Service`
+- [x] **7.1** HTML + plain-text template: purchase confirmation
+- [x] **7.1** HTML + plain-text template: card codes delivery
+- [x] **7.1** HTML + plain-text template: payment expired
+- [x] **7.2** HTML + plain-text template: card activation notice
+- [x] **7.2** HTML + plain-text template: redemption confirmation
+- [x] **7.3** Mailpit already in `docker-compose.yml` (added in prior session) at `gift-card-backend.mail:1025` / `localhost:8025`
+- [x] **7.3** Fix SuccessPage timeout message: poll `payment_status = expired` and show correct copy — done in prior session
+- [ ] **7.4** Add `email_unsubscribed` flag to users table (future)
+- [ ] **7.4** Add SPF/DKIM DNS records for sending domain
+
+---
 
 - This roadmap is subject to change based on user feedback and market conditions
 - Prioritize user experience and security over speed of implementation

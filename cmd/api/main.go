@@ -19,6 +19,7 @@ import (
 	"btc-giftcard/config"
 	"btc-giftcard/internal/card"
 	"btc-giftcard/internal/database"
+	"btc-giftcard/internal/email"
 	"btc-giftcard/internal/fees"
 	"btc-giftcard/internal/lnd"
 	"btc-giftcard/internal/payment"
@@ -94,7 +95,15 @@ func run() error {
 	if err := copier.Copy(&feesCfg, &Cfg.Fees); err != nil {
 		return fmt.Errorf("failed to copy fees config: %w", err)
 	}
-	cardService := card.NewService(db, cardRepo, txRepo, queue, lndClient, stripeProvider, &feesCfg)
+	var emailCfg email.Config
+	if err := copier.Copy(&emailCfg, &Cfg.Email); err != nil {
+		return fmt.Errorf("failed to copy fees config: %w", err)
+	}
+	mailer, err := email.New(emailCfg)
+	if err != nil {
+		return fmt.Errorf("failed to initialise email provider: %w", err)
+	}
+	cardService := card.NewService(db, cardRepo, txRepo, queue, lndClient, stripeProvider, &feesCfg, mailer)
 
 	srv := newServer(cardService, lndClient, stripeProvider)
 

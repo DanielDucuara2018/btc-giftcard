@@ -231,8 +231,30 @@ services:
         condition: service_healthy
     restart: "no"
 
+  # ── Mailpit — local SMTP catch-all for email testing ───────────────────────
+  # Web UI:  http://localhost:8025
+  # SMTP:    localhost:1025  (point EMAIL_HOST here in config settings)
+  mailpit:
+    image: axllent/mailpit
+    networks:
+      gift_card_bridge:
+        ipv4_address: 169.254.12.8
+        aliases:
+          - "gift-card-backend.mail"
+    ports:
+      - "8025:8025"   # Web UI
+      - "1025:1025"   # SMTP
+    environment:
+      MP_MAX_MESSAGES: 5000
+      MP_SMTP_AUTH_ACCEPT_ANY: 1
+      MP_SMTP_AUTH_ALLOW_INSECURE: 1
+    volumes:
+      - mailpit_data:/data
+
 volumes:
   postgres_data:
   redis_data:
   lnd_data:
+  mailpit_data:
   go_cache:    # shared Go module cache — avoids re-downloading modules on every `docker compose up`
+  

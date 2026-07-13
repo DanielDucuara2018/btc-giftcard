@@ -139,6 +139,30 @@ type ApiConfig struct {
 		// a channel. Channel size = confirmed_balance - LNDChannelTargetSats.
 		LNDChannelTargetSats int64 `toml:"lnd_channel_target_sats" env:"GIFTER_TREASURY_LND_CHANNEL_TARGET_SATS"`
 	} `toml:"treasury"`
+
+	// Email controls the transactional email provider used for purchase
+	// confirmations, card codes delivery, payment notifications, and receipts.
+	Email struct {
+		// Provider selects the sending backend: "smtp" | "disabled"
+		// "disabled" silently drops all messages — safe for local dev without Mailpit.
+		// Default: "disabled" so contributors never accidentally send real emails.
+		Provider string `toml:"provider" env:"GIFTER_EMAIL_PROVIDER" env-default:"disabled"`
+
+		// SMTP settings — used when Provider = "smtp".
+		// Local dev (Mailpit): SMTPHost = "gift-card-backend.mail", SMTPPort = "1025", no auth.
+		// Production (AWS SES): SMTPHost = "email-smtp.<region>.amazonaws.com", SMTPPort = "587",
+		//   SMTPTLS = true, SMTPUser/SMTPPass from SES SMTP credentials.
+		SMTPHost string `toml:"smtp_host"     env:"GIFTER_EMAIL_SMTP_HOST"     env-default:"gift-card-backend.mail"`
+		SMTPPort string `toml:"smtp_port"     env:"GIFTER_EMAIL_SMTP_PORT"     env-default:"1025"`
+		SMTPUser string `toml:"smtp_user"     env:"GIFTER_EMAIL_SMTP_USER"`
+		SMTPPass string `toml:"smtp_password" env:"GIFTER_EMAIL_SMTP_PASS"`
+		SMTPTLS  bool   `toml:"smtp_tls"      env:"GIFTER_EMAIL_SMTP_TLS"      env-default:"false"`
+
+		// FromAddress is the envelope sender and header From address.
+		FromAddress string `toml:"from_address" env:"GIFTER_EMAIL_FROM_ADDRESS" env-default:"noreply@gifter.com"`
+		// FromName is the display name shown alongside the From address.
+		FromName string `toml:"from_name" env:"GIFTER_EMAIL_FROM_NAME" env-default:"GIFTER"`
+	} `toml:"email"`
 }
 
 // StripeSuccessURL returns the full redirect URL for successful Stripe Checkout sessions.

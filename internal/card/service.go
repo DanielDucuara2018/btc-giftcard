@@ -2,6 +2,7 @@ package card
 
 import (
 	"btc-giftcard/internal/database"
+	"btc-giftcard/internal/email"
 	"btc-giftcard/internal/fees"
 	"btc-giftcard/internal/lnd"
 	"btc-giftcard/internal/payment"
@@ -78,6 +79,7 @@ type Service struct {
 	lndClient       *lnd.Client
 	paymentProvider payment.Provider
 	fees            *fees.Config
+	mailer          *email.Mailer
 }
 
 // NewService creates a new card service instance.
@@ -89,6 +91,7 @@ func NewService(
 	lndClient *lnd.Client,
 	paymentProvider payment.Provider,
 	fees *fees.Config,
+	mailer *email.Mailer,
 ) *Service {
 	return &Service{
 		db:              db,
@@ -98,6 +101,7 @@ func NewService(
 		lndClient:       lndClient,
 		paymentProvider: paymentProvider,
 		fees:            fees,
+		mailer:          mailer,
 	}
 }
 
@@ -267,6 +271,29 @@ func (s *Service) CreateCard(ctx context.Context, req CreateCardRequest) (*Creat
 		zap.String("session_id", sessionID),
 	)
 
+	// Send purchase confirmation email (fire-and-forget — never blocks the response).
+	// Compute total for display: sum of face values across all items.
+	var totalCents int64
+	for _, item := range req.Items {
+		totalCents += item.FiatAmountCents * int64(item.Quantity)
+	}
+	go func() {
+		if err := s.mailer.SendPurchaseConfirmation(context.Background(), email.PurchaseConfirmationData{
+			PurchaseEmail:        req.PurchaseEmail,
+			TotalCards:           len(created),
+			TotalAmountFormatted: formatCents(totalCents),
+			FiatCurrency:         string(req.FiatCurrency),
+			CheckoutURL:          checkoutURL,
+			SessionID:            sessionID,
+			ExpiresAt:            expiresAt,
+		}); err != nil {
+			logger.Error("failed to send purchase confirmation email",
+				zap.String("session_id", sessionID),
+				zap.Error(err),
+			)
+		}
+	}()
+
 	return &CreateCardResponse{
 		Cards:       created,
 		CheckoutURL: checkoutURL,
@@ -382,6 +409,32 @@ func (s *Service) RedeemCard(ctx context.Context, req RedeemCardRequest) (*Redee
 		zap.Int64("amount_sats", req.AmountSats),
 		zap.Int64("remaining_sats", remainingBalance),
 	)
+
+	// Send redemption confirmation email (fire-and-forget).
+	// Low balance warning when remaining < 10% of original card balance.
+	lowBalance := card.BTCAmountSats > 0 && remainingBalance < card.BTCAmountSats/10
+	go func() {
+		data := email.RedemptionData{
+			OwnerEmail:       card.OwnerEmail,
+			CardCode:         req.Code,
+			AmountSats:       req.AmountSats,
+			RemainingBalance: remainingBalance,
+			Method:           string(req.Method),
+			LowBalance:       lowBalance,
+		}
+		if payResult.PaymentHash != nil {
+			data.PaymentHash = *payResult.PaymentHash
+		}
+		if payResult.TxHash != nil {
+			data.TxHash = *payResult.TxHash
+		}
+		if err := s.mailer.SendRedemptionConfirmation(context.Background(), data); err != nil {
+			logger.Error("failed to send redemption confirmation email",
+				zap.String("card_id", card.ID),
+				zap.Error(err),
+			)
+		}
+	}()
 
 	return &RedeemCardResponse{
 		TransactionID:    redeemedTx.ID,
@@ -603,6 +656,23 @@ func (s *Service) FundCard(ctx context.Context, cardID string, satoshis int64) e
 
 	// Step 7: Invalidate treasury cache (balance changed)
 	s.InvalidateTreasuryCache(ctx)
+
+	// Send card activation email (fire-and-forget — card is now Active).
+	go func() {
+		if err := s.mailer.SendCardActivation(context.Background(), email.CardActivationData{
+			PurchaseEmail:       card.PurchaseEmail,
+			CardCode:            card.Code,
+			BTCAmountSats:       satoshis,
+			BTCAmountFormatted:  formatSats(satoshis),
+			FiatAmountFormatted: formatCents(card.FiatAmountCents),
+			FiatCurrency:        string(card.FiatCurrency),
+		}); err != nil {
+			logger.Error("failed to send card activation email",
+				zap.String("card_id", card.ID),
+				zap.Error(err),
+			)
+		}
+	}()
 
 	return nil
 }
@@ -919,6 +989,20 @@ func (s *Service) generateCardCode(ctx context.Context) (string, error) {
 	return "", errors.New("failed to generate unique card code after 5 attempts")
 }
 
+// ============================================================================
+// Formatting helpers — used when building email template data
+// ============================================================================
+
+// formatCents converts an integer cent amount to a display string (e.g. 4999 → "49.99").
+func formatCents(cents int64) string {
+	return fmt.Sprintf("%d.%02d", cents/100, cents%100)
+}
+
+// formatSats converts satoshis to a BTC display string (e.g. 25000 → "0.00025000").
+func formatSats(sats int64) string {
+	return fmt.Sprintf("%.8f", float64(sats)/1e8)
+}
+
 func (s *Service) HandleCheckoutEvent(ctx context.Context, event *payment.Event) error {
 	if event.CheckoutSession == nil {
 		return nil
@@ -965,6 +1049,37 @@ func (s *Service) HandleCheckoutEvent(ctx context.Context, event *payment.Event)
 				}
 			}
 		}
+
+		// Send card codes email (fire-and-forget).
+		// Cards are not yet Active at this point — they are still in Created status
+		// and will be funded by the worker. We send the codes now so the buyer
+		// has a receipt in their inbox even if the browser session is closed.
+		go func(cards []*database.Card) {
+			codeItems := make([]email.CardCodeItem, len(cards))
+			var totalCents int64
+			for i, c := range cards {
+				codeItems[i] = email.CardCodeItem{
+					Code:               c.Code,
+					FaceValueFormatted: formatCents(c.FiatAmountCents),
+				}
+				totalCents += c.FiatAmountCents
+			}
+			purchaseEmail := cards[0].PurchaseEmail
+			fiatCurrency := string(cards[0].FiatCurrency)
+			if err := s.mailer.SendCardCodes(context.Background(), email.CardCodesData{
+				PurchaseEmail:        purchaseEmail,
+				TotalCards:           len(cards),
+				TotalAmountFormatted: formatCents(totalCents),
+				FiatCurrency:         fiatCurrency,
+				Cards:                codeItems,
+			}); err != nil {
+				logger.Error("failed to send card codes email",
+					zap.String("session_id", sessionID),
+					zap.Error(err),
+				)
+			}
+		}(cards)
+
 	case payment.EventCheckoutExpired:
 		cards, err := s.cardRepo.GetByStripeSessionID(ctx, sessionID)
 		if err != nil {
@@ -978,6 +1093,27 @@ func (s *Service) HandleCheckoutEvent(ctx context.Context, event *payment.Event)
 		if err := s.cardRepo.UpdatePaymentStatus(ctx, sessionID, database.PaymentExpired); err != nil {
 			return fmt.Errorf("failed to update payment status for session %s: %w", sessionID, err)
 		}
+
+		// Send payment expired email (fire-and-forget).
+		go func(cards []*database.Card) {
+			var totalCents int64
+			for _, c := range cards {
+				totalCents += c.FiatAmountCents
+			}
+			purchaseEmail := cards[0].PurchaseEmail
+			fiatCurrency := string(cards[0].FiatCurrency)
+			if err := s.mailer.SendPaymentExpired(context.Background(), email.PaymentExpiredData{
+				PurchaseEmail:        purchaseEmail,
+				SessionID:            sessionID,
+				TotalAmountFormatted: formatCents(totalCents),
+				FiatCurrency:         fiatCurrency,
+			}); err != nil {
+				logger.Error("failed to send payment expired email",
+					zap.String("session_id", sessionID),
+					zap.Error(err),
+				)
+			}
+		}(cards)
 	}
 	return nil
 }

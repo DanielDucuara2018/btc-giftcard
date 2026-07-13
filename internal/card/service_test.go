@@ -4,6 +4,7 @@ package card
 
 import (
 	"btc-giftcard/internal/database"
+	"btc-giftcard/internal/email"
 	"btc-giftcard/internal/fees"
 	"btc-giftcard/internal/payment"
 	messages "btc-giftcard/internal/queue"
@@ -81,7 +82,7 @@ func setupTestService(t *testing.T) (*Service, *database.DB, *database.CardRepos
 	err := queue.DeclareStream(ctx, "fund_card", "test_workers")
 	require.NoError(t, err)
 
-	service := NewService(db, cardRepo, txRepo, queue, nil, nil, nil)
+	service := NewService(db, cardRepo, txRepo, queue, nil, nil, nil, email.NewMailer(email.NewNoop(), ""))
 	return service, db, cardRepo, redisClient
 }
 
@@ -106,7 +107,7 @@ func setupTestServiceFull(t *testing.T) (*Service, *database.DB, *database.CardR
 	err := queue.DeclareStream(ctx, "fund_card", "test_workers")
 	require.NoError(t, err)
 
-	service := NewService(db, cardRepo, txRepo, queue, nil, &mockPaymentProvider{}, testFeesCfg())
+	service := NewService(db, cardRepo, txRepo, queue, nil, &mockPaymentProvider{}, testFeesCfg(), email.NewMailer(email.NewNoop(), ""))
 	return service, db, cardRepo, redisClient
 }
 

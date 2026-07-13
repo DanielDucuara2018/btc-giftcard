@@ -87,7 +87,7 @@ func (c *stripeClient) ConstructEvent(rawBody []byte, sigHeader string) (*Event,
 		webhook.ConstructEventOptions{IgnoreAPIVersionMismatch: true},
 	)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: %w", ErrInvalidWebhookSignature, err)
 	}
 
 	event := &Event{Type: string(stripeEvent.Type)}

@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Your Bitcoin Gift Card is Active</title>
+</head>
+
+<body
+    style="margin:0;padding:0;background:#f4f4f5;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;">
+    <table width="100%" cellpadding="0" cellspacing="0" style="background:#f4f4f5;padding:32px 0;">
+        <tr>
+            <td align="center">
+                <table width="600" cellpadding="0" cellspacing="0"
+                    style="max-width:600px;width:100%;background:#ffffff;border-radius:8px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,0.1);">
+
+                    <!-- Header -->
+                    <tr>
+                        <td style="background:#f7931a;padding:24px 32px;text-align:center;">
+                            <span style="font-size:28px;font-weight:700;color:#ffffff;letter-spacing:-0.5px;">₿ BTC Gift
+                                Cards</span>
+                        </td>
+                    </tr>
+
+                    <!-- Body -->
+                    <tr>
+                        <td style="padding:32px;">
+                            <h1 style="margin:0 0 16px;font-size:22px;font-weight:600;color:#111827;">Your Card is
+                                Active!</h1>
+                            <p style="margin:0 0 24px;color:#6b7280;font-size:15px;line-height:1.6;">
+                                Your Bitcoin Gift Card has been funded and is ready to use.
+                            </p>
+
+                            <!-- Card details -->
+                            <table width="100%" cellpadding="0" cellspacing="0"
+                                style="background:#fffbeb;border:1px solid #f59e0b;border-radius:6px;margin-bottom:24px;">
+                                <tr>
+                                    <td style="padding:20px 24px;">
+                                        <table width="100%" cellpadding="4" cellspacing="0">
+                                            <tr>
+                                                <td style="font-size:13px;color:#92400e;font-weight:600;">Card code</td>
+                                                <td
+                                                    style="font-size:18px;color:#111827;font-weight:700;text-align:right;font-family:monospace;letter-spacing:2px;">
+                                                    {{.CardCode}}</td>
+                                            </tr>
+                                            <tr>
+                                                <td style="font-size:13px;color:#92400e;">Bitcoin balance</td>
+                                                <td
+                                                    style="font-size:13px;color:#111827;font-weight:600;text-align:right;">
+                                                    {{.BTCAmountFormatted}} BTC ({{.BTCAmountSats}} sats)</td>
+                                            </tr>
+                                            <tr>
+                                                <td style="font-size:13px;color:#92400e;">Face value</td>
+                                                <td
+                                                    style="font-size:13px;color:#111827;font-weight:600;text-align:right;">
+                                                    {{.FiatAmountFormatted}} {{.FiatCurrency}}</td>
+                                            </tr>
+                                        </table>
+                                    </td>
+                                </tr>
+                            </table>
+
+                            <p
+                                style="margin:0 0 8px;color:#6b7280;font-size:14px;line-height:1.6;font-weight:600;color:#111827;">
+                                How to use your card:</p>
+                            <ol style="margin:0 0 24px;padding-left:20px;color:#6b7280;font-size:14px;line-height:1.8;">
+                                <li>Go to our redemption page.</li>
+                                <li>Enter your card code.</li>
+                                <li>Provide a Lightning invoice or on-chain address.</li>
+                                <li>Receive bitcoin instantly.</li>
+                            </ol>
+
+                            <p style="margin:0;color:#9ca3af;font-size:13px;line-height:1.6;">
+                                <strong style="color:#111827;">Keep this code safe.</strong>
+                                It is equivalent to cash — anyone with the code can spend the balance.
+                                If you have questions, reply to this email.
+                            </p>
+                        </td>
+                    </tr>
+
+                    <!-- Footer -->
+                    <tr>
+                        <td style="background:#f9fafb;padding:20px 32px;border-top:1px solid #e5e7eb;">
+                            <p style="margin:0;font-size:12px;color:#9ca3af;text-align:center;">
+                                BTC Gift Cards &mdash; Questions? Reply to this email.
+                            </p>
+                        </td>
+                    </tr>
+
+                </table>
+            </td>
+        </tr>
+    </table>
+</body>
+
+</html>

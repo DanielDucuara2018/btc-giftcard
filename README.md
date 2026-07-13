@@ -17,21 +17,32 @@ A custodial Bitcoin gift card service built in Go. Users purchase gift cards wit
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Created
-    Created --> Funding : worker picks up
+    [*] --> Created : POST /api/cards\npayment_status=pending
+    Created --> Created_Paid : webhook\ncheckout.session.completed\npayment_status=paid
+    Created --> Expired_Payment : webhook\ncheckout.session.expired\npayment_status=expired
+    Created_Paid --> Funding : fund_card worker picks up
     Funding --> Active : BTC price fetched, sats assigned
     Active --> Active : partial spend (balance reduced)
     Active --> Redeemed : balance = 0
-    Funding --> Expired : funding timed out
+    Funding --> Created_Paid : treasury insufficient (retried)
 ```
 
-| Status   | Meaning                                     |
-|----------|---------------------------------------------|
-| Created  | Card saved, awaiting BTC price + funding    |
-| Funding  | Worker is calculating sats and activating    |
-| Active   | Card has a BTC balance, ready to redeem      |
-| Redeemed | Balance is zero, card is fully spent         |
-| Expired  | Funding timed out (rare edge case)           |
+| Status   | Meaning                                                          |
+|----------|------------------------------------------------------------------|
+| Created  | Card saved; payment pending or paid, awaiting funding worker     |
+| Funding  | Worker acquired treasury lock, calculating sats                  |
+| Active   | Card has a BTC balance, ready to redeem                          |
+| Redeemed | Balance is zero, card is fully spent                             |
+| Expired  | Funding timed out (rare edge case)                               |
+
+**Payment status** (separate from card status):
+
+| Payment Status | Meaning |
+|---|---|
+| pending | Checkout session created, awaiting payment |
+| paid | Stripe confirmed payment; funding worker will activate card |
+| expired | Checkout session timed out (24h); card never funded |
+| failed | Payment failed |
 
 ---
 
@@ -68,10 +79,13 @@ graph TD
 
 | Endpoint | Purpose |
 |---|---|
-| `POST /api/cards` | Create card |
-| `POST /api/cards/{code}/redeem` | Redeem card via Lightning Network |
+| `POST /api/cards` | Create bulk card order → returns Stripe `checkout_url` |
 | `GET /api/cards/{code}` | Get card details |
-| `GET /api/cards/{code}/balance` | Get balance |
+| `GET /api/cards/{code}/balance` | Get remaining sats balance |
+| `GET /api/cards/{code}/validate` | Check validity and status |
+| `POST /api/cards/{code}/redeem` | Redeem card via Lightning Network |
+| `GET /api/checkout/sessions/{id}` | Poll payment + activation status |
+| `POST /api/webhook/stripe` | Stripe webhook receiver |
 | `GET /api/treasury/balance` | Available treasury sats |
 | `GET /health` | Health check |
 
@@ -83,24 +97,32 @@ graph TD
 sequenceDiagram
     participant User
     participant API
+    participant Stripe
     participant DB as PostgreSQL
     participant Queue as Redis Stream
     participant Worker as fund_card worker
     participant Exchange as Price Provider
     participant LND
 
-    User->>API: POST /api/cards {amount, currency, email}
-    API->>DB: Insert card (status=Created)
-    API->>Queue: Publish FundCardMessage
-    API-->>User: 201 {card_code}
+    User->>API: POST /api/cards {items, currency, email}
+    API->>Stripe: CreateCheckoutSession
+    Stripe-->>API: {checkout_url, session_id}
+    API->>DB: Insert cards (status=created, payment_status=pending)
+    API-->>User: 200 {checkout_url, session_id, cards[]}
 
-    Queue->>Worker: Consume message
-    Worker->>Exchange: GetPrice(currency)
+    User->>Stripe: Complete payment on hosted checkout
+    Stripe-->>User: Redirect to /success?session_id=...
+    Stripe->>API: POST /webhook/stripe (checkout.session.completed)
+    API->>DB: UpdatePaymentStatus → paid
+    API->>Queue: Publish FundCardMessage per card
+
+    Queue->>Worker: Consume FundCardMessage
+    Worker->>Exchange: GetPrice(fiat_currency)
     Exchange-->>Worker: BTC price
-    Worker->>Worker: Calculate satoshis
+    Worker->>Worker: Calculate satoshis from net_fiat_amount_cents
     Worker->>LND: GetChannelBalance + GetWalletBalance
     LND-->>Worker: Treasury balance
-    Worker->>DB: Update card (sats, status=Active)
+    Worker->>DB: Update card (status=active, btc_amount_sats)
     Worker->>DB: Insert transaction (type=fund)
 ```
 
@@ -144,24 +166,31 @@ btc-giftcard/
 │   └── migrate/                # Database migration runner
 ├── internal/
 │   ├── card/                   # Core business logic
-│   │   ├── service.go          #   Card lifecycle, treasury, redemption
+│   │   ├── service.go          #   Card lifecycle, Stripe checkout, webhook handler, redemption
 │   │   └── service_test.go     #   Integration tests
+│   ├── fees/                   # Fee calculation engine
+│   │   ├── calculator.go       #   Service, Stripe, SEPA fee breakdown
+│   │   └── calculator_test.go
+│   ├── payment/                # Payment provider abstraction
+│   │   ├── provider.go         #   Provider interface
+│   │   ├── models.go           #   LineItem, CheckoutSession, Event types
+│   │   ├── stripe.go           #   Stripe client (CreateCheckoutSession, ConstructEvent)
+│   │   └── stripe_test.go
 │   ├── lnd/                    # LND gRPC client wrapper
-│   │   ├── client.go           #   Connection, TLS, macaroon auth
+│   │   ├── client.go           #   Connection, TLS, macaroon auth, Network enum
 │   │   ├── lightning.go        #   PayInvoice, DecodeInvoice
 │   │   ├── onchain.go          #   NewAddress, GetWalletBalance
 │   │   ├── treasury.go         #   GetChannelBalance, GetInfo
 │   │   └── *_test.go           #   Unit + integration tests
 │   ├── database/               # PostgreSQL models + repositories
-│   │   ├── model.go            #   Card, Transaction, enums
+│   │   ├── model.go            #   Card, Transaction, FiatCurrency/PaymentMethod enums
 │   │   ├── card_repository.go  #   CRUD for cards
 │   │   └── transaction_repository.go # CRUD for transactions
 │   ├── queue/                  # Message definitions
-│   │   └── messages.go         #   FundCardMessage
+│   │   └── messages.go         #   FundCardMessage {card_id, net_fiat_amount_cents, fiat_currency}
 │   ├── exchange/               # BTC/fiat price providers
 │   │   └── provider.go         #   Coinbase, CoinGecko, Bitstamp
 │   ├── crypto/                 # AES-256-GCM encryption utilities
-│   ├── payment/                # (placeholder) Bank transfer integration
 │   └── merchant/               # (placeholder) Merchant payment features
 ├── pkg/
 │   ├── cache/                  # Redis client wrapper (Get/Set/SetNX/Delete/Incr)
@@ -280,6 +309,7 @@ max_payment_fee_sats = 100
 
 - Go 1.24+
 - Docker & Docker Compose v2
+- [Stripe CLI](https://docs.stripe.com/stripe-cli/install) (for local webhook testing)
 
 ### 1. Start the full stack
 
@@ -305,7 +335,262 @@ curl http://localhost:3202/api/node/info | jq .synced_to_chain
 go test ./...                     # All tests
 go test ./internal/lnd/... -v     # LND unit tests
 go test ./internal/card/... -v    # Card service tests
+go test -tags=integration ./...   # integration tests
 ```
+
+---
+
+## Local Stripe Payment Testing (No Frontend Required)
+
+This section explains how to exercise the full payment flow — card creation,
+Stripe checkout, webhook processing, and card activation — using only `curl`
+and the Stripe CLI.
+
+### Why the Stripe CLI is required for local testing
+
+Stripe's servers cannot reach `localhost`. The `stripe listen` command acts as
+an authenticated tunnel: Stripe sends webhook events to the CLI process, which
+forwards them as HTTP `POST` requests to your local server.
+
+```
+Stripe servers  →  stripe listen  →  localhost:3202/api/webhook/stripe
+```
+
+Without `stripe listen` running, no webhook events reach your server and cards
+remain in `payment_status = pending` indefinitely.
+
+### Step 1 — Configure Stripe credentials
+
+In `.env` (or `config.toml`), set your Stripe **test** keys:
+
+```bash
+GIFTER_STRIPE_SECRET_KEY=sk_test_...      # from dashboard.stripe.com/apikeys
+GIFTER_STRIPE_WEBHOOK_SECRET=            # leave empty for now — filled in Step 3
+GIFTER_FRONTEND_BASE_URL=http://localhost:5173
+```
+
+### Step 2 — Start the stack
+
+```bash
+docker compose up -d
+```
+
+### Step 3 — Start the Stripe CLI listener
+
+```bash
+stripe login          # one-time OAuth — opens browser
+stripe listen \
+  --events checkout.session.completed,checkout.session.expired \
+  --forward-to localhost:3202/api/webhook/stripe
+```
+
+The CLI prints:
+
+```
+Ready! Your webhook signing secret is 'whsec_abc123...' (^C to quit)
+```
+
+Copy that `whsec_...` value into `.env` / `config.toml` as `GIFTER_STRIPE_WEBHOOK_SECRET`,
+then restart the API container:
+
+```bash
+docker compose restart app
+```
+
+> The `whsec_` secret is session-scoped — it changes every time you run `stripe listen`.
+> Update your config and restart the API whenever you start a new listener session.
+
+### Step 4 — Create a card order
+
+```bash
+curl -s -X POST http://localhost:3202/api/cards \
+  -H "Content-Type: application/json" \
+  -d '{
+    "items": [{"fiat_amount_cents": 5000, "quantity": 1}],
+    "fiat_currency": "EUR",
+    "purchase_email": "test@example.com",
+    "payment_method": "card"
+  }' | jq .
+```
+
+Expected response:
+
+```json
+{
+  "cards": [{"card_id": "...", "code": "GIFT-XXXX-YYYY-ZZZZ"}],
+  "checkout_url": "https://checkout.stripe.com/c/pay/cs_test_...",
+  "session_id":   "cs_test_...",
+  "expires_at":   "2026-05-18T10:00:00Z"
+}
+```
+
+Save the `session_id` — you will need it in Step 6.
+
+> **Multiple denominations in one order:**
+> ```bash
+> "items": [
+>   {"fiat_amount_cents": 5000, "quantity": 2},
+>   {"fiat_amount_cents": 10000, "quantity": 1}
+> ]
+> ```
+
+### Step 5 — Simulate payment: success
+
+**Option A — via Stripe CLI trigger (no browser needed):**
+
+```bash
+stripe trigger checkout.session.completed \
+  --override checkout_session:id=<session_id_from_step_4>
+```
+
+**Option B — complete checkout in a browser:**
+
+Open the `checkout_url` from Step 4. Use Stripe's test card:
+
+| Field | Value |
+|---|---|
+| Card number | `4242 4242 4242 4242` |
+| Expiry | Any future date |
+| CVC | Any 3 digits |
+| ZIP | Any 5 digits |
+
+After paying, Stripe redirects to `http://localhost:5173/success?session_id=...`.
+
+### Step 6 — Verify webhook was processed
+
+Immediately after payment, the CLI terminal shows:
+
+```
+--> checkout.session.completed [evt_...]
+<-- [200] POST http://localhost:3202/api/webhook/stripe [evt_...]
+```
+
+The card's `payment_status` changes to `paid`. The `fund_card` worker then
+picks up a `FundCardMessage` and activates the card.
+
+Poll the session endpoint to confirm:
+
+```bash
+curl -s http://localhost:3202/api/checkout/sessions/<session_id> | jq .
+```
+
+Expected (after worker runs):
+
+```json
+{
+  "session_id": "cs_test_...",
+  "payment_status": "paid",
+  "cards": [
+    {
+      "id": "...",
+      "code": "GIFT-XXXX-YYYY-ZZZZ",
+      "status": "active",
+      "btc_amount_sats": 12345,
+      "fiat_amount_cents": 5000
+    }
+  ]
+}
+```
+
+### Step 7 — Simulate payment: failure / expiry
+
+```bash
+# Trigger a session expiry event
+stripe trigger checkout.session.expired \
+  --override checkout_session:id=<session_id>
+```
+
+The card's `payment_status` becomes `expired`; `status` stays `created`.
+
+### Step 8 — Redeem an active card
+
+```bash
+# Check balance
+curl -s http://localhost:3202/api/cards/GIFT-XXXX-YYYY-ZZZZ/balance | jq .
+
+# Redeem via Lightning (provide a real BOLT11 invoice from your testnet wallet)
+curl -s -X POST http://localhost:3202/api/cards/GIFT-XXXX-YYYY-ZZZZ/redeem \
+  -H "Content-Type: application/json" \
+  -d '{
+    "method": "lightning",
+    "invoice": "lntb...",
+    "amount_sats": 1000
+  }' | jq .
+```
+
+### Full API Reference
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| `POST` | `/api/cards` | Create card order → returns Stripe `checkout_url` |
+| `GET` | `/api/cards/{code}` | Get card details |
+| `GET` | `/api/cards/{code}/balance` | Get remaining satoshi balance |
+| `GET` | `/api/cards/{code}/validate` | Check if code is valid and active |
+| `POST` | `/api/cards/{code}/redeem` | Redeem via Lightning invoice |
+| `GET` | `/api/checkout/sessions/{id}` | Poll payment + activation status |
+| `GET` | `/api/treasury/balance` | Available treasury sats |
+| `POST` | `/api/webhook/stripe` | Stripe webhook receiver (internal) |
+| `GET` | `/api/node/info` | LND node info |
+| `GET` | `/api/node/wallet/balance` | On-chain wallet balance |
+| `GET` | `/api/node/channels/balance` | Channel balance |
+| `GET` | `/health` | Health check |
+
+### Error Response Format
+
+All errors use a consistent JSON envelope:
+
+```json
+{
+  "code":    400,
+  "message": "fiat amount must be positive",
+  "errors":  null
+}
+```
+
+| Status | Meaning |
+|--------|---------|
+| 400 | Validation error — `message` contains the specific field problem |
+| 404 | Resource not found |
+| 409 | Conflict — card not active, already redeemed |
+| 422 | Insufficient funds on card |
+| 429 | Rate limit exceeded (100 req/IP/60s) |
+| 500 | Internal server error |
+| 502 | LND node unreachable |
+
+---
+
+## Stripe Webhook Behavior — Important Notes
+
+### Why the success page works without `stripe listen`
+
+When a user pays on Stripe's hosted checkout page, Stripe redirects their browser
+to `<frontend>/success?session_id=...`. This redirect happens **regardless of
+whether the webhook was delivered**.
+
+The success page represents **Stripe's own checkout session completing**, not
+backend payment confirmation. There are two distinct concepts:
+
+| What happened | Indicator |
+|---|---|
+| User submitted payment on Stripe | Browser redirected to `/success` |
+| Backend confirmed payment via webhook | `payment_status = paid` in DB |
+| Card funded with BTC | `status = active`, `btc_amount_sats > 0` |
+
+If `stripe listen` is not running, the card stays `payment_status = pending` and
+the `fund_card` worker never receives a message. The card is never activated. The
+user sees the success page but their card code has no BTC balance.
+
+This is intentional for production: Stripe retries webhook delivery for 3 days,
+so transient server downtime does not lose events. In development, you must have
+`stripe listen` running to simulate the webhook delivery.
+
+### Architectural risk
+
+The current SuccessPage polls `GET /api/checkout/sessions/{id}` and displays card
+codes when `payment_status = paid`. If the webhook never arrives (e.g. development
+without the CLI, or a permanent infrastructure failure), the poll times out after
+90 seconds and shows a generic message. The user has paid but cannot see their
+codes. This is a known gap — see the Frontend Error Handling section below.
 
 ---
 

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"btc-giftcard/internal/card"
+	"btc-giftcard/internal/payment"
 	"btc-giftcard/pkg/cache"
 	"btc-giftcard/pkg/logger"
 
@@ -190,7 +191,8 @@ type APIError struct {
 // Looked up via errors.Is (not direct key access) so wrapped errors
 // like fmt.Errorf("...: %w", ErrCardNotFound) are matched correctly.
 var errorStatusMap = map[error]int{
-	card.ErrInvalidCurrency:   http.StatusBadRequest,
+	payment.ErrInvalidWebhookSignature: http.StatusBadRequest,
+	card.ErrInvalidCurrency:            http.StatusBadRequest,
 	card.ErrInvalidFiatAmount: http.StatusBadRequest,
 	card.ErrMissingEmail:      http.StatusBadRequest,
 	card.ErrEmptyItems:        http.StatusBadRequest,

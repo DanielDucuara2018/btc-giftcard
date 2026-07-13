@@ -65,3 +65,15 @@ stripe_fee_flat_eur = 0.25
 crypto_spread_pct = 0.16
 sepa_fee_eur = 0.0
 payment_expiry_h = 24
+
+[email]
+# "smtp" sends via SMTP (Mailpit locally, AWS SES SMTP in production)
+# "disabled" silently drops all messages — default for new contributors
+provider = "disabled"
+smtp_host = "gift-card-backend.mail" # Mailpit container alias in Docker network
+smtp_port = "1025"
+smtp_user = ""
+smtp_password = ""
+smtp_tls = false
+from_address = "noreply@gifter.com"
+from_name = "GIFTER"

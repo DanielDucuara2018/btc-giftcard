@@ -4,7 +4,11 @@
 # Switches the entire stack to a local, private Bitcoin chain where blocks are
 # mined on demand.  No external sync, no faucets needed, coins are free.
 #
-# Usage:
+# Usage (prefer the one-command bootstrap script):
+#   ./scripts/regtest-setup.sh           # fresh start — tears down old volumes
+#   ./scripts/regtest-setup.sh --no-reset  # resume existing stack
+#
+# Manual startup (advanced):
 #   docker compose -f docker-compose.yml -f docker-compose.regtest.yml up -d
 #
 # Mine coins on demand (run after the stack is up):
@@ -13,9 +17,15 @@
 #     exec bitcoind bitcoin-cli -regtest -rpcuser=btc -rpcpassword=btc \
 #     generatetoaddress 101 "$ADDR"
 #
-# IMPORTANT: uses a separate lnd_data_regtest volume so testnet and regtest
-# wallets never collide.  Run `docker compose ... down -v` before switching
-# back to testnet to avoid stale volume issues.
+# IMPORTANT — Volume lifecycle:
+#   All three data volumes (bitcoind_data_regtest, lnd_data_regtest,
+#   lnd_data_regtest_customer) must be wiped together.  If bitcoind is reset
+#   but the LND volumes are kept, LND's wallet birthday (the block height at
+#   which it was created) will be higher than the fresh chain height → LND
+#   logs "-8: Block height out of range" in a 5s retry loop.
+#
+#   Safe reset:  docker compose -f … down -v   (wipes all three volumes)
+#   Safe resume: docker compose -f … down      (keeps all three volumes)
 # ==============================================================================
 
 services:
@@ -27,9 +37,11 @@ services:
     image: ruimarinho/bitcoin-core:latest
     networks:
       gift_card_bridge:
-        ipv4_address: 169.254.12.8
+        ipv4_address: 169.254.12.9
         aliases:
           - "gift-card-backend.bitcoind"
+    volumes:
+      - bitcoind_data_regtest:/home/bitcoin/.bitcoin   # persists in sync with LND volumes
     command:
       - "-regtest"
       - "-server"
@@ -121,7 +133,7 @@ services:
     image: lightninglabs/lnd:v0.18.4-beta
     networks:
       gift_card_bridge:
-        ipv4_address: 169.254.12.9
+        ipv4_address: 169.254.12.10
         aliases:
           - "gift-card-backend.lnd-customer"
     volumes:
@@ -137,7 +149,7 @@ services:
       - "--rpclisten=0.0.0.0:10009"
       - "--restlisten=0.0.0.0:8080"
       - "--tlsextradomain=gift-card-backend.lnd-customer"
-      - "--tlsextraip=169.254.12.9"
+      - "--tlsextraip=169.254.12.10"
       - "--noseedbackup"
       - "--listen=0.0.0.0:9735"
     ports:
@@ -161,5 +173,6 @@ services:
       - lnd_data_regtest:/root/.lnd:ro
 
 volumes:
+  bitcoind_data_regtest:      # bitcoind chain data — must be wiped together with LND volumes
   lnd_data_regtest:
   lnd_data_regtest_customer:
